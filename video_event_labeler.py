@@ -29,6 +29,7 @@ BEHAVIOR_LABELS = (
     "stay_long",
     "cat_enter_frame",
     "dog_enter_frame",
+    "car_enter_frame",
     "stranger_enter_frame",
     "approach_risk_zone",
     "normal_scene",
@@ -56,6 +57,7 @@ BEHAVIOR_CLASSES = {
     "stay_long": "长时间逗留",
     "cat_enter_frame": "猫进入画面",
     "dog_enter_frame": "狗进入画面",
+    "car_enter_frame": "车辆进入画面",
     "stranger_enter_frame": "入侵",
     "approach_risk_zone": "靠近风险区域",
     "normal_scene": "正常场景",
@@ -161,6 +163,11 @@ def format_time_text(value: int | None) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
 
+def is_valid_custom_label(label: str) -> bool:
+    """Return whether a manually entered event label is safe to store in CSV."""
+    return 1 <= len(label) <= 64 and not any(char in label for char in ",\r\n")
+
+
 def validate_events(
     events: list[dict[str, object]], permitted_labels: set[str], review: bool
 ) -> list[dict[str, object]]:
@@ -177,11 +184,8 @@ def validate_events(
         if not isinstance(event_type, str) or not event_type.strip():
             raise ValueError("event_type is required")
         event_type = event_type.strip()
-        if event_type not in permitted_labels:
+        if event_type not in permitted_labels and not is_valid_custom_label(event_type):
             raise ValueError(f"unsupported behavior label: {event_type}")
-        if event_type in event_types:
-            raise ValueError(f"duplicate behavior label: {event_type}")
-
         start = event.get("start_time_ms")
         end = event.get("end_time_ms")
         for name, value in (("start_time_ms", start), ("end_time_ms", end)):
@@ -260,7 +264,7 @@ def events_to_csv_value(events: list[dict[str, object]]) -> str:
 
 def parse_events(value: str, behavior_ids: list[str]) -> list[dict[str, object]]:
     """Read both standard JSON events and the legacy ms-suffixed format."""
-    parsed: dict[str, dict[str, object]] = {}
+    parsed: list[dict[str, object]] = []
     value = (value or "").strip()
     if value:
         try:
@@ -270,24 +274,27 @@ def parse_events(value: str, behavior_ids: list[str]) -> list[dict[str, object]]
         if isinstance(decoded, list):
             for event in decoded:
                 if isinstance(event, dict) and isinstance(event.get("event_type"), str):
-                    parsed[event["event_type"]] = {
-                        "event_type": event["event_type"],
-                        "start_time_ms": event.get("start_time_ms"),
-                        "end_time_ms": event.get("end_time_ms"),
-                    }
+                    parsed.append(
+                        {
+                            "event_type": event["event_type"],
+                            "start_time_ms": event.get("start_time_ms"),
+                            "end_time_ms": event.get("end_time_ms"),
+                        }
+                    )
         else:
             for event_type, start, end in EVENT_PATTERN.findall(value):
-                parsed[event_type] = {
-                    "event_type": event_type,
-                    "start_time_ms": _event_time_from_csv(start),
-                    "end_time_ms": _event_time_from_csv(end),
-                }
+                parsed.append(
+                    {
+                        "event_type": event_type,
+                        "start_time_ms": _event_time_from_csv(start),
+                        "end_time_ms": _event_time_from_csv(end),
+                    }
+                )
 
+    if parsed:
+        return parsed
     return [
-        parsed.get(
-            behavior_id,
-            {"event_type": behavior_id, "start_time_ms": None, "end_time_ms": None},
-        )
+        {"event_type": behavior_id, "start_time_ms": None, "end_time_ms": None}
         for behavior_id in behavior_ids
         if behavior_id
     ]
@@ -605,7 +612,7 @@ HTML = r"""<!doctype html>
     <aside class="side">
       <div class="scroll">
         <section class="section"><div class="section-title">人员标签</div><div id="person-tags" class="tag-group"><button class="tag" data-tag="stranger">陌生人</button><button class="tag" data-tag="acquaintance">熟人</button><button class="tag" data-tag="null">未判断</button></div></section>
-        <section id="events-section" class="section"><div class="section-title">行为与时间段</div><div class="behavior-add"><select id="behavior-picker"><option value="person_fall">person_fall</option><option value="climb_fence">climb_fence</option><option value="peep_car_window">peep_car_window</option><option value="pickup_package">pickup_package</option><option value="linger_wander">linger_wander</option><option value="stay_long">stay_long</option><option value="cat_enter_frame">cat_enter_frame</option><option value="dog_enter_frame">dog_enter_frame</option><option value="stranger_enter_frame">stranger_enter_frame</option><option value="approach_risk_zone">approach_risk_zone</option><option value="normal_scene">normal_scene</option></select><button id="add-event-segment">新建事件片段</button></div><div id="event-list" class="event-list"></div></section>
+        <section id="events-section" class="section"><div class="section-title">行为与时间段</div><div class="behavior-add"><select id="behavior-picker"><option value="person_fall">person_fall</option><option value="climb_fence">climb_fence</option><option value="peep_car_window">peep_car_window</option><option value="pickup_package">pickup_package</option><option value="linger_wander">linger_wander</option><option value="stay_long">stay_long</option><option value="cat_enter_frame">cat_enter_frame</option><option value="dog_enter_frame">dog_enter_frame</option><option value="car_enter_frame">car_enter_frame</option><option value="stranger_enter_frame">stranger_enter_frame</option><option value="approach_risk_zone">approach_risk_zone</option><option value="normal_scene">normal_scene</option></select><button id="add-event-segment">新建事件片段</button></div><div class="behavior-add"><input id="custom-behavior" maxlength="64" placeholder="自定义行为标签" aria-label="自定义行为标签"><button id="add-custom-event">添加自定义片段</button></div><div id="event-list" class="event-list"></div></section>
         <section class="section"><div class="actions"><button id="previous-row" class="icon" title="上一条" aria-label="上一条">&larr;</button><button id="next-row" class="icon" title="下一条" aria-label="下一条">&rarr;</button><button id="save-draft" class="primary">保存草稿</button><button id="review-next" class="review">审核并下一条</button></div></section>
       </div>
       <div id="status" class="status">就绪</div><div class="filters"><span id="progress" class="progress" aria-live="polite"></span><select id="filter"><option value="all">全部视频</option><option value="pending">待审核</option><option value="reviewed">已审核</option><option value="needs-time">需补时间</option></select></div><div id="list" class="list"></div>
@@ -654,12 +661,15 @@ function cardRange(card){const inputs=card.querySelectorAll("input");if(inputs.l
 function stopLoop(){loopRange=null;eventList.querySelectorAll(".loop.active").forEach(button=>button.classList.remove("active"))}
 function updateLoopButton(card){const button=card.querySelector(".loop");if(button)button.disabled=!cardRange(card)}
 function addLoopControl(card,head){const button=makeButton("循环片段","capture loop");button.title="重复播放该行为的标注时间段";button.onclick=()=>{const range=cardRange(card);if(!range){setStatus("请先填写有效的开始和结束时间",true);return}if(loopRange&&loopRange.card===card){stopLoop();return}stopLoop();loopRange={card,start:range.start,end:range.end};button.classList.add("active");video.currentTime=range.start;video.play().catch(()=>setStatus("浏览器阻止了自动播放，请点击视频后重试",true))};head.append(button);card.querySelectorAll(".time-row input,.time-row .capture").forEach(control=>control.addEventListener(control.tagName==="INPUT"?"input":"click",()=>{stopLoop();updateLoopButton(card)}));updateLoopButton(card)}
-function renderEventCard(event){const card=document.createElement("article");card.className="event";card.dataset.eventType=event.event_type;const head=document.createElement("div");head.className="event-head";const name=document.createElement("span");name.className="event-name";name.textContent=event.event_type;const remove=makeButton("删除","icon");remove.title="删除该行为";remove.onclick=()=>{if(loopRange&&loopRange.card===card)stopLoop();card.remove();changeDirty()};head.append(name,remove);card.append(head);if(event.event_type!=="normal_scene"){const start=makeTimeRow("开始",event.start_time_ms);const end=makeTimeRow("结束",event.end_time_ms);card.append(start.row,end.row);addLoopControl(card,head)}eventList.append(card)}
+function eventTypeOptions(events){const labels=[...$("behavior-picker").options].map(option=>option.value);for(const event of events)if(!labels.includes(event.event_type))labels.push(event.event_type);return labels}
+function changeEventType(card,value){let events;try{events=currentEvents()}catch(error){setStatus(error.message,true);return}const index=[...eventList.querySelectorAll(".event")].indexOf(card);if(index<0||events[index].event_type===value)return;if(value==="normal_scene"){if(events.length>1&&!confirm("选择 normal_scene 会清除其他未保存行为，是否继续？")){card.querySelector(".event-type").value=events[index].event_type;return}events=[{event_type:"normal_scene",start_time_ms:null,end_time_ms:null}]}else{if(events[index].event_type==="normal_scene"){events[index].start_time_ms=null;events[index].end_time_ms=null}events[index].event_type=value;events=events.filter(event=>event.event_type!=="normal_scene")}stopLoop();renderEvents({events});changeDirty()}
+function renderEventCard(event,labels){const card=document.createElement("article");card.className="event";card.dataset.eventType=event.event_type;const head=document.createElement("div");head.className="event-head";const select=document.createElement("select");select.className="event-type";select.style.flex="1";select.style.minWidth="0";select.setAttribute("aria-label","行为标签");for(const eventType of labels){const option=document.createElement("option");option.value=eventType;option.textContent=eventType;select.append(option)}select.value=event.event_type;select.addEventListener("change",()=>changeEventType(card,select.value));const remove=makeButton("删除","icon");remove.title="删除该行为";remove.onclick=()=>{if(loopRange&&loopRange.card===card)stopLoop();card.remove();changeDirty()};head.append(select,remove);card.append(head);if(event.event_type!=="normal_scene"){const start=makeTimeRow("开始",event.start_time_ms);const end=makeTimeRow("结束",event.end_time_ms);card.append(start.row,end.row);addLoopControl(card,head)}eventList.append(card)}
 function renderSimple(row){eventList.replaceChildren();const card=document.createElement("article");card.className="event";card.dataset.eventType="__simple__";const head=document.createElement("div");head.className="event-head";const title=document.createElement("span");title.className="event-name";title.textContent="行为时间段";head.append(title);const start=makeTimeRow("开始",parseTimeSafe(row.start_time));const end=makeTimeRow("结束",parseTimeSafe(row.end_time));card.append(head,start.row,end.row);addLoopControl(card,head);eventList.append(card)}
-function renderEvents(row){eventList.replaceChildren();if(mode==="simple"){renderSimple(row);return}for(const event of row.events||[])renderEventCard(event)}
+function renderEvents(row){eventList.replaceChildren();if(mode==="simple"){renderSimple(row);return}const events=row.events||[],labels=eventTypeOptions(events);for(const event of events)renderEventCard(event,labels)}
 function currentEvents(){return[...eventList.querySelectorAll(".event")].map(card=>{const inputs=card.querySelectorAll("input");return{event_type:card.dataset.eventType,start_time_ms:inputs.length?parseTime(inputs[0].value):null,end_time_ms:inputs.length?parseTime(inputs[1].value):null}})}
 function addBehavior(){if(mode!=="events"||current<0)return;const value=$("behavior-picker").value;const existing=[...eventList.querySelectorAll(".event")].map(card=>card.dataset.eventType);if(value==="normal_scene"&&existing.length&&!confirm("添加 normal_scene 会清除其他未保存行为，是否继续？"))return;if(value!=="normal_scene"&&existing.includes("normal_scene")&&!confirm("添加正例会清除 normal_scene，是否继续？"))return;if(value==="normal_scene")eventList.replaceChildren();if(value!=="normal_scene"&&existing.includes("normal_scene"))eventList.replaceChildren();renderEventCard({event_type:value,start_time_ms:null,end_time_ms:null});changeDirty()}
-function addEventSegment(){if(mode!=="events"||current<0)return;const value=$("behavior-picker").value;const existing=[...eventList.querySelectorAll(".event")].map(card=>card.dataset.eventType);if(value==="normal_scene"&&existing.length&&!confirm("添加 normal_scene 会清除其他未保存行为，是否继续？"))return;if(value!=="normal_scene"&&existing.includes("normal_scene")&&!confirm("添加正例会清除 normal_scene，是否继续？"))return;if(value==="normal_scene")eventList.replaceChildren();if(value!=="normal_scene"&&existing.includes("normal_scene"))eventList.replaceChildren();renderEventCard({event_type:value,start_time_ms:null,end_time_ms:null});changeDirty()}
+function addEventSegment(value=$("behavior-picker").value){if(mode!=="events"||current<0)return;let events;try{events=currentEvents()}catch(error){setStatus(error.message,true);return}const hasNormal=events.some(event=>event.event_type==="normal_scene");if(value==="normal_scene"&&events.length&&!confirm("添加 normal_scene 会清除其他未保存行为，是否继续？"))return;if(value!=="normal_scene"&&hasNormal&&!confirm("添加正例会清除 normal_scene，是否继续？"))return;if(value==="normal_scene")events=[];if(value!=="normal_scene")events=events.filter(event=>event.event_type!=="normal_scene");events.push({event_type:value,start_time_ms:null,end_time_ms:null});stopLoop();renderEvents({events});changeDirty()}
+function addCustomEventSegment(){const input=$("custom-behavior"),value=input.value.trim();if(!value||value.length>64||/[,\r\n]/.test(value)){setStatus("自定义标签需为 1-64 个字符，且不能包含逗号或换行",true);return}addEventSegment(value);input.value=""}
 function visibleRows(){return rows.map((row,index)=>({row,index})).filter(item=>isVisible(item.row))}
 function renderProgress(visible){const position=visible.findIndex(item=>item.index===current)+1;const ready=visible.filter(item=>eventState(item.row)==="ready").length;const needsTime=visible.length-ready;$("progress").textContent=`第 ${Math.max(position,0)} / ${visible.length} 条 | 可审核 ${ready} | 需补时间 ${needsTime}`;$("previous-row").disabled=position<=1;$("next-row").disabled=position<1||position>=visible.length}
 function renderList(){const list=$("list");list.replaceChildren();const visible=visibleRows();renderProgress(visible);if(!visible.length){const empty=document.createElement("div");empty.className="empty";empty.textContent=rows.length?"当前筛选没有匹配的视频":"尚未导入视频";list.append(empty);return}for(const{row,index}of visible){const item=document.createElement("button");item.className="item"+(index===current?" active":"");item.type="button";const number=document.createElement("span");number.className="number";number.textContent=index+1;const name=document.createElement("span");name.className="sample";name.textContent=row.sample_id;name.title=row.sample_id;const state=eventState(row);const badge=document.createElement("span");badge.className="badge "+(state==="needs-time"?"needs-time":"reviewed");badge.textContent=state==="needs-time"?"需补时间":"可审核";item.append(number,name,badge);item.onclick=()=>openRow(index);list.append(item)}}
@@ -667,7 +677,7 @@ async function moveVisibleRow(delta){const visible=visibleRows();const position=
 async function openRow(index){if(index<0||index>=rows.length)return;if(current!==index&&dirty&&!(await save(false)))return;stopLoop();current=index;const row=rows[index];video.src=row.video_url;video.playbackRate=speed;$("meta").replaceChildren();const strong=document.createElement("strong");strong.textContent=row.sample_id;const details=[row.behavior_class||row.behavior_id||"未选择行为",row.lighting||""].filter(Boolean);$("meta").append(strong,document.createTextNode(`  |  ${details.join("  |  ")}`));setTag(row.person_tag_list);renderEvents(row);dirty=false;renderList();setStatus(eventState(row)==="needs-time"?"需补时间":"可审核")}
 video.addEventListener("timeupdate",()=>{if(loopRange&&video.currentTime>=loopRange.end){video.currentTime=loopRange.start;video.play().catch(()=>{})}});
 video.addEventListener("ended",()=>{if(loopRange){video.currentTime=loopRange.start;video.play().catch(()=>{})}});
-$("add-event-segment").onclick=addEventSegment;$("previous-row").onclick=()=>moveVisibleRow(-1);$("next-row").onclick=()=>moveVisibleRow(1);$("review-next").onclick=async()=>{if(await save(true))await moveVisibleRow(1)};
+$("add-event-segment").onclick=addEventSegment;$("add-custom-event").onclick=addCustomEventSegment;$("custom-behavior").addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();addCustomEventSegment()}});$("previous-row").onclick=()=>moveVisibleRow(-1);$("next-row").onclick=()=>moveVisibleRow(1);$("review-next").onclick=async()=>{if(await save(true))await moveVisibleRow(1)};
 </script>
 </body>
 </html>"""

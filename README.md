@@ -2,7 +2,7 @@
 
 `behavior_class` 取导入根目录下的第一级文件夹名称。例如导入 `D:\dapeng-test` 时，`D:\dapeng-test\跌倒\pos\clip.mp4` 的类别为 `跌倒`。再次导入会刷新已发现视频的类别，但保留人工事件、时间和人员标签。
 
-选择固定行为标签后，点击“新建事件片段”可新增独立的行为片段；同一行为可添加多段。每段的时间可精确录入或通过“截取”写入毫秒时间，填写有效起止时间后可点击“循环片段”反复检查该区间。右侧同时提供上一条、下一条和当前筛选进度，所有操作控件均位于侧栏，不遮挡视频播放区域。
+选择固定行为标签后，点击“新建事件片段”可新增独立的行为片段；也可在下方输入自定义行为标签并点击“添加自定义片段”。每个片段卡片顶部都可重新选择标签，方便创建后修正；同一标签可以对应多个独立的时间片段。自定义标签会写入当前视频的现有事件列，重新打开 CSV 后仍可查看和编辑，但不会加入固定下拉列表。每段的时间可精确录入或通过“截取”写入毫秒时间，填写有效起止时间后可点击“循环片段”反复检查该区间。右侧同时提供上一条、下一条和当前筛选进度，所有操作控件均位于侧栏，不遮挡视频播放区域。
 
 无需安装第三方库。使用 Python 3 在本机启动后，浏览器打开 `http://127.0.0.1:8765`。
 
@@ -25,9 +25,11 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 
 支持的行为标签：
 
-`person_fall`、`climb_fence`、`peep_car_window`、`pickup_package`、`linger_wander`、`stay_long`、`cat_enter_frame`、`dog_enter_frame`、`stranger_enter_frame`、`approach_risk_zone`、`normal_scene`。
+`person_fall`、`climb_fence`、`peep_car_window`、`pickup_package`、`linger_wander`、`stay_long`、`cat_enter_frame`、`dog_enter_frame`、`car_enter_frame`、`stranger_enter_frame`、`approach_risk_zone`、`normal_scene`。
 
-`pos` 路径中的视频会按目录和文件名预填正例标签；`neg` 路径会预填 `normal_scene`。标签本身及别名均可识别，`dog_out` 会预填为 `dog_enter_frame`。多行为按照标签在路径或文件名中的出现顺序预选，人工仍可增删和调整时间。
+`pos` 路径中的视频会按目录和文件名预填正例标签；`neg` 路径会预填 `normal_scene`。标签本身及别名均可识别，`dog_out` 会预填为 `dog_enter_frame`，文件名包含标准名 `car_enter_frame` 会预填该标签。多行为按照标签在路径或文件名中的出现顺序预选，人工仍可增删和调整时间。
+
+自定义标签支持中文或英文，去除首尾空格后最多 64 个字符，不能含逗号或换行。它们不会从文件名自动识别；需要时在当前视频的“自定义行为标签”输入框重新填写即可。
 
 “保存草稿”可保存未完整的时间段；“审核并下一条”要求正例的每个行为都有合法的开始、结束时间，且结束必须晚于开始；`normal_scene` 不需要时间段。界面根据事件时间显示“需补时间”或“可审核”，审核状态不写入新清单。
 
