@@ -940,7 +940,17 @@ async function importVideoRoot(){
 }
 $("import-path").onclick=importVideoRoot;
 $("video-root-path").addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();importVideoRoot()}});
-$("import-folder").onclick=async()=>{setStatus("正在打开文件夹选择器...");try{await request("/api/import-folder",{method:"POST"});current=-1;dirty=false;await load();setStatus("视频目录已导入")}catch(error){setStatus(error.message,true)}};
+async function importWithFolderPicker(){
+  const button=$("import-folder");
+  button.disabled=true;
+  setStatus("正在打开文件夹选择器...");
+  try{
+    await request("/api/import-folder",{method:"POST"});
+    current=-1;dirty=false;await load();setStatus("视频目录已导入");
+  }catch(error){setStatus(error.message,true)}
+  finally{button.disabled=false}
+}
+$("import-folder").onclick=importWithFolderPicker;
 $("add-event-segment").onclick=()=>addBehavior();$("save-draft").onclick=()=>save(false);$("review-next").onclick=async()=>{if(await save(true)){const next=rows.findIndex((row,index)=>index>current&&isVisible(row));if(next>=0)await openRow(next)}};$("filter").onchange=renderList;document.querySelectorAll(".tag").forEach(button=>button.onclick=()=>{setTag(button.dataset.tag);changeDirty()});document.querySelectorAll(".speed button").forEach(button=>button.onclick=()=>{document.querySelectorAll(".speed button").forEach(item=>item.classList.remove("active"));button.classList.add("active");speed=Number(button.dataset.speed);video.playbackRate=speed});document.addEventListener("keydown",event=>{if(event.target.tagName==="INPUT"||event.target.tagName==="SELECT")return;if(event.key==="ArrowLeft")moveVisibleRow(-1);if(event.key==="ArrowRight")moveVisibleRow(1);if(event.key===" "){event.preventDefault();video.paused?video.play():video.pause()}});load();
 </script>
 <script>

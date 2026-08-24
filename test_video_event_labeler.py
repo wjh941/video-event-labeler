@@ -914,6 +914,16 @@ class FolderPickerDispatchTests(unittest.TestCase):
 
 
 class HtmlContractTests(unittest.TestCase):
+    def test_native_picker_button_is_restored_after_request(self):
+        for marker in (
+            "async function importWithFolderPicker()",
+            "button.disabled=true",
+            "finally{button.disabled=false}",
+            '$("import-folder").onclick=importWithFolderPicker',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, labeler.HTML)
+
     def test_path_import_controls_are_exposed(self):
         for marker in (
             'id="video-root-path"',
