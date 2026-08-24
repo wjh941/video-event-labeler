@@ -13,6 +13,12 @@ python .\video_event_labeler.py --video-root 'D:\dapeng-test'
 python .\video_event_labeler.py --video-root 'D:\videos' --csv 'D:\videos\existing.csv'
 ```
 
+If the native folder picker is unavailable, paste the local directory path into the `video-root-path` field in the web page and click `import-path`. The equivalent command-line fallback is:
+
+```powershell
+python .\video_event_labeler.py --video-root "D:\videos"
+```
+
 不带参数启动后，点击“导入视频文件夹”选择目录。工具会递归扫描常见视频格式，并在该目录创建或增量更新 `video_labeler_manifest.csv`。已有标注不会因再次导入而覆盖。
 
 新生成的清单使用 UTF-8 with BOM 编码，并严格采用以下九列及顺序，兼容 `0818_cam03_clips_sample_sorted_by_start_event_labeler_manifest.csv`：
