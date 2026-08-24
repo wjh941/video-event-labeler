@@ -821,21 +821,13 @@ class FolderPickerDispatchTests(unittest.TestCase):
                 0,
                 create=True,
             ),
-            patch.object(
-                labeler,
-                "_foreground_window_handle",
-                return_value=4321,
-                create=True,
-            ),
         )
 
     def test_windows_picker_terminates_when_no_visible_window_appears(self):
         process = self.FakePickerProcess()
-        popen, old_run, visible, startup_timeout, foreground = self.picker_patches(
-            process, False
-        )
+        popen, old_run, visible, startup_timeout = self.picker_patches(process, False)
 
-        with popen, old_run, visible, startup_timeout, foreground:
+        with popen, old_run, visible, startup_timeout:
             with self.assertRaisesRegex(ValueError, "系统文件夹选择器不可用"):
                 labeler.choose_video_root()
 
@@ -843,45 +835,61 @@ class FolderPickerDispatchTests(unittest.TestCase):
 
     def test_windows_picker_returns_selected_path_after_window_appears(self):
         process = self.FakePickerProcess(stdout="D:\\videos\r\n")
-        popen, old_run, visible, startup_timeout, foreground = self.picker_patches(
-            process, True
-        )
+        popen, old_run, visible, startup_timeout = self.picker_patches(process, True)
 
-        with popen as start, old_run, visible, startup_timeout, foreground:
+        with popen as start, old_run, visible, startup_timeout:
             selected = labeler.choose_video_root()
 
         self.assertEqual(selected, Path("D:/videos"))
         command = start.call_args.args[0]
         self.assertEqual(command[:3], ["powershell.exe", "-NoProfile", "-STA"])
         self.assertIn("FolderBrowserDialog", command[-1])
-        self.assertIn("NativeWindowOwner", command[-1])
-        self.assertIn("[IntPtr]4321", command[-1])
         self.assertIn("ShowDialog($owner)", command[-1])
 
-    def test_windows_picker_fails_before_launch_without_a_foreground_window(self):
+    def test_windows_picker_uses_its_own_topmost_owner(self):
+        process = self.FakePickerProcess()
+        popen, old_run, visible, startup_timeout = self.picker_patches(process, True)
+
         with (
+            popen as start,
+            old_run,
+            visible,
+            startup_timeout,
             patch.object(
                 labeler,
                 "_foreground_window_handle",
                 return_value=0,
                 create=True,
             ),
-            patch.object(labeler.subprocess, "Popen") as start,
         ):
-            with self.assertRaises(ValueError):
-                labeler.choose_video_root()
+            try:
+                selected = labeler.choose_video_root()
+            except ValueError as error:
+                self.fail(f"picker must launch without a foreground window: {error}")
 
-        start.assert_not_called()
+        self.assertIsNone(selected)
+        start.assert_called_once()
+        script = start.call_args.args[0][-1]
+        for marker in (
+            "System.Windows.Forms.Form",
+            "$owner.ShowInTaskbar=$false",
+            "$owner.Opacity=0",
+            "$owner.TopMost=$true",
+            "$owner.Show()",
+            "$owner.Activate()",
+            "ShowDialog($owner)",
+            "$owner.Dispose()",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, script)
 
     def test_windows_picker_terminates_when_selection_times_out(self):
         process = self.FakePickerProcess(
             communicate_errors=[subprocess.TimeoutExpired("powershell.exe", 300)]
         )
-        popen, old_run, visible, startup_timeout, foreground = self.picker_patches(
-            process, True
-        )
+        popen, old_run, visible, startup_timeout = self.picker_patches(process, True)
 
-        with popen, old_run, visible, startup_timeout, foreground:
+        with popen, old_run, visible, startup_timeout:
             with self.assertRaisesRegex(ValueError, "文件夹选择超时"):
                 labeler.choose_video_root()
 

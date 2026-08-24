@@ -802,16 +802,6 @@ def _process_has_visible_window(process_id: int) -> bool:
         return False
 
 
-def _foreground_window_handle() -> int:
-    """Return the active Windows window handle used to own the picker dialog."""
-    if os.name != "nt":
-        return 0
-    try:
-        return int(ctypes.windll.user32.GetForegroundWindow() or 0)
-    except (AttributeError, OSError):
-        return 0
-
-
 def _terminate_picker_process(process: subprocess.Popen[str]) -> tuple[str, str]:
     """Terminate and reap a picker process without leaving it orphaned."""
     try:
@@ -830,26 +820,25 @@ def choose_video_root() -> Path | None:
     if os.name != "nt":
         return _choose_video_root_tk()
 
-    owner_handle = _foreground_window_handle()
-    if not owner_handle:
-        raise ValueError(
-            "系统文件夹选择器不可用，请在路径框中输入视频目录并点击“按路径导入”"
-        )
-
     dialog_script = (
         "Add-Type -AssemblyName System.Windows.Forms;"
-        "Add-Type -TypeDefinition 'using System; using System.Windows.Forms; "
-        "public sealed class NativeWindowOwner : IWin32Window { "
-        "public NativeWindowOwner(IntPtr handle) { Handle = handle; } "
-        "public IntPtr Handle { get; private set; } }';"
+        "Add-Type -AssemblyName System.Drawing;"
         "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-        f"$owner=New-Object NativeWindowOwner -ArgumentList ([IntPtr]{owner_handle});"
+        "$owner=New-Object System.Windows.Forms.Form;"
+        "$owner.ShowInTaskbar=$false;"
+        "$owner.FormBorderStyle=[System.Windows.Forms.FormBorderStyle]::FixedToolWindow;"
+        "$owner.StartPosition=[System.Windows.Forms.FormStartPosition]::CenterScreen;"
+        "$owner.Size=New-Object System.Drawing.Size(1,1);"
+        "$owner.Opacity=0;"
+        "$owner.TopMost=$true;"
         "$dialog=New-Object System.Windows.Forms.FolderBrowserDialog;"
         "$dialog.Description='选择视频文件夹';"
         "$dialog.ShowNewFolderButton=$false;"
+        "try{$owner.Show();$owner.Activate();"
         "$result=$dialog.ShowDialog($owner);"
         "if($result -eq [System.Windows.Forms.DialogResult]::OK) "
-        "{ [Console]::WriteLine($dialog.SelectedPath) }"
+        "{[Console]::WriteLine($dialog.SelectedPath)}}"
+        "finally{$dialog.Dispose();$owner.Close();$owner.Dispose()}"
     )
     command = ["powershell.exe", "-NoProfile", "-STA", "-Command", dialog_script]
     try:
