@@ -845,6 +845,19 @@ class FolderPickerDispatchTests(unittest.TestCase):
 
 
 class HtmlContractTests(unittest.TestCase):
+    def test_path_import_controls_are_exposed(self):
+        for marker in (
+            'id="video-root-path"',
+            'id="import-path"',
+            'function importVideoRoot()',
+            'video_root:path',
+            '请输入视频目录',
+            '正在导入视频目录',
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(marker, labeler.HTML)
+        self.assertNotIn('$("video-root-path").value=""', labeler.HTML)
+
     def test_interface_exposes_import_draft_review_and_behavior_controls(self):
         for identifier in (
             'id="import-folder"',
