@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import csv
 import hashlib
 import json
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -75,6 +77,9 @@ EVENT_PATTERN = re.compile(
 )
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
 VIDEO_READ_CHUNK_SIZE = 1024 * 1024
+PICKER_STARTUP_TIMEOUT_SECONDS = 3.0
+PICKER_SELECTION_TIMEOUT_SECONDS = 300.0
+PICKER_POLL_INTERVAL_SECONDS = 0.1
 MANIFEST_FIELDS = [
     "sample_id",
     "video_path",
@@ -773,6 +778,43 @@ def _choose_video_root_tk() -> Path | None:
         raise ValueError(f"folder picker is unavailable: {error}") from error
 
 
+def _process_has_visible_window(process_id: int) -> bool:
+    """Return whether a Windows process owns a visible top-level window."""
+    if os.name != "nt":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        found = False
+        callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def inspect_window(window: int, _: int) -> bool:
+            nonlocal found
+            owner = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
+            if owner.value == process_id and user32.IsWindowVisible(window):
+                found = True
+                return False
+            return True
+
+        user32.EnumWindows(callback_type(inspect_window), 0)
+        return found
+    except (AttributeError, OSError):
+        return False
+
+
+def _terminate_picker_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Terminate and reap a picker process without leaving it orphaned."""
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    try:
+        return process.communicate(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.communicate(timeout=2)
+
+
 def choose_video_root() -> Path | None:
     """Open a desktop folder picker without requiring Tk in the HTTP process."""
     if os.name != "nt":
@@ -788,22 +830,47 @@ def choose_video_root() -> Path | None:
         "if($result -eq [System.Windows.Forms.DialogResult]::OK) "
         "{ [Console]::WriteLine($dialog.SelectedPath) }"
     )
+    command = ["powershell.exe", "-NoProfile", "-STA", "-Command", dialog_script]
     try:
-        completed = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-STA", "-Command", dialog_script],
-            capture_output=True,
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=300,
-            check=False,
         )
-    except (OSError, subprocess.SubprocessError) as error:
+    except OSError as error:
         raise ValueError(f"folder picker is unavailable: {error}") from error
-    if completed.returncode != 0:
-        detail = completed.stderr.strip() or f"exit code {completed.returncode}"
+
+    deadline = time.monotonic() + PICKER_STARTUP_TIMEOUT_SECONDS
+    visible = False
+    while process.poll() is None:
+        if _process_has_visible_window(process.pid):
+            visible = True
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(PICKER_POLL_INTERVAL_SECONDS)
+
+    if process.poll() is None and not visible:
+        _terminate_picker_process(process)
+        raise ValueError(
+            "系统文件夹选择器不可用，请在路径框中输入视频目录并点击“按路径导入”"
+        )
+
+    try:
+        stdout, stderr = process.communicate(
+            timeout=PICKER_SELECTION_TIMEOUT_SECONDS if visible else 2
+        )
+    except subprocess.TimeoutExpired as error:
+        _terminate_picker_process(process)
+        raise ValueError("文件夹选择超时，请重试或使用“按路径导入”") from error
+
+    if process.returncode != 0:
+        detail = stderr.strip() or f"exit code {process.returncode}"
         raise ValueError(f"folder picker is unavailable: {detail}")
-    selected = completed.stdout.strip()
+    selected = stdout.strip()
     return Path(selected) if selected else None
 
 

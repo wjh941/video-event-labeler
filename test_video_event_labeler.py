@@ -773,20 +773,89 @@ class ApiTests(unittest.TestCase):
 
 
 class FolderPickerDispatchTests(unittest.TestCase):
-    def test_folder_picker_uses_windows_native_dialog_process(self):
-        completed = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="D:\\videos\r\n",
-            stderr="",
+    class FakePickerProcess:
+        def __init__(self, stdout="", stderr="", communicate_errors=None):
+            self.pid = 1234
+            self.returncode = None
+            self.stdout = stdout
+            self.stderr = stderr
+            self.communicate_errors = list(communicate_errors or [])
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            if self.communicate_errors:
+                raise self.communicate_errors.pop(0)
+            if self.returncode is None:
+                self.returncode = 0
+            return self.stdout, self.stderr
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+    def picker_patches(self, process, visible):
+        return (
+            patch.object(labeler.subprocess, "Popen", return_value=process),
+            patch.object(
+                labeler.subprocess,
+                "run",
+                side_effect=AssertionError("picker must use observable Popen"),
+            ),
+            patch.object(
+                labeler,
+                "_process_has_visible_window",
+                return_value=visible,
+                create=True,
+            ),
+            patch.object(
+                labeler,
+                "PICKER_STARTUP_TIMEOUT_SECONDS",
+                0,
+                create=True,
+            ),
         )
-        with patch.object(labeler.subprocess, "run", return_value=completed) as run:
+
+    def test_windows_picker_terminates_when_no_visible_window_appears(self):
+        process = self.FakePickerProcess()
+        popen, old_run, visible, startup_timeout = self.picker_patches(process, False)
+
+        with popen, old_run, visible, startup_timeout:
+            with self.assertRaisesRegex(ValueError, "系统文件夹选择器不可用"):
+                labeler.choose_video_root()
+
+        self.assertTrue(process.terminated)
+
+    def test_windows_picker_returns_selected_path_after_window_appears(self):
+        process = self.FakePickerProcess(stdout="D:\\videos\r\n")
+        popen, old_run, visible, startup_timeout = self.picker_patches(process, True)
+
+        with popen as start, old_run, visible, startup_timeout:
             selected = labeler.choose_video_root()
 
         self.assertEqual(selected, Path("D:/videos"))
-        command = run.call_args.args[0]
+        command = start.call_args.args[0]
         self.assertEqual(command[:3], ["powershell.exe", "-NoProfile", "-STA"])
         self.assertIn("FolderBrowserDialog", command[-1])
+
+    def test_windows_picker_terminates_when_selection_times_out(self):
+        process = self.FakePickerProcess(
+            communicate_errors=[subprocess.TimeoutExpired("powershell.exe", 300)]
+        )
+        popen, old_run, visible, startup_timeout = self.picker_patches(process, True)
+
+        with popen, old_run, visible, startup_timeout:
+            with self.assertRaisesRegex(ValueError, "文件夹选择超时"):
+                labeler.choose_video_root()
+
+        self.assertTrue(process.terminated)
 
     def test_import_picker_does_not_block_other_http_requests(self):
         server_holder = {}
