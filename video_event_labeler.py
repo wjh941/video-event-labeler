@@ -792,6 +792,13 @@ def _process_has_visible_window(process_id: int) -> bool:
             owner = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
             if owner.value == process_id and user32.IsWindowVisible(window):
+                alpha = ctypes.c_ubyte(255)
+                flags = ctypes.c_ulong()
+                is_layered = user32.GetLayeredWindowAttributes(
+                    window, None, ctypes.byref(alpha), ctypes.byref(flags)
+                )
+                if is_layered and flags.value & 0x2 and alpha.value == 0:
+                    return True
                 found = True
                 return False
             return True

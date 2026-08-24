@@ -773,6 +773,21 @@ class ApiTests(unittest.TestCase):
 
 
 class FolderPickerDispatchTests(unittest.TestCase):
+    class TransparentOwnerUser32:
+        def EnumWindows(self, callback, _):
+            callback(100, 0)
+
+        def GetWindowThreadProcessId(self, _, owner):
+            owner._obj.value = 1234
+
+        def IsWindowVisible(self, _):
+            return True
+
+        def GetLayeredWindowAttributes(self, _, __, alpha, flags):
+            alpha._obj.value = 0
+            flags._obj.value = 2
+            return True
+
     class FakePickerProcess:
         def __init__(self, stdout="", stderr="", communicate_errors=None):
             self.pid = 1234
@@ -800,6 +815,15 @@ class FolderPickerDispatchTests(unittest.TestCase):
         def kill(self):
             self.killed = True
             self.returncode = -9
+
+    def test_visible_window_detection_ignores_fully_transparent_owner(self):
+        class FakeWindll:
+            user32 = self.TransparentOwnerUser32()
+
+        with patch.object(labeler.ctypes, "windll", FakeWindll()):
+            visible = labeler._process_has_visible_window(1234)
+
+        self.assertFalse(visible)
 
     def picker_patches(self, process, visible):
         return (
