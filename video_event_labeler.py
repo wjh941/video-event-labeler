@@ -842,6 +842,10 @@ class TkFolderPickerBroker:
                 request.done.set()
 
 
+def unavailable_folder_picker() -> Path | None:
+    raise ValueError(PICKER_UNAVAILABLE_MESSAGE)
+
+
 HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1138,9 +1142,15 @@ HTML = _normalize_html(HTML)
 
 
 class LabelerHTTPServer(ThreadingHTTPServer):
-    def __init__(self, address: tuple[str, int], state: AppState):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        state: AppState,
+        folder_picker: Callable[[], Path | None],
+    ):
         super().__init__(address, Handler)
         self.state = state
+        self.folder_picker = folder_picker
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1289,7 +1299,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("video_root is required")
                     root = Path(raw_root.strip())
                 else:
-                    root = choose_video_root()
+                    root = self.server.folder_picker()
                 if root is None:
                     raise ValueError("no video folder was selected")
                 manifest, added = apply_imported_root(self.server.state, root)
@@ -1303,8 +1313,12 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-def create_server(state: AppState, port: int = 0) -> LabelerHTTPServer:
-    return LabelerHTTPServer(("127.0.0.1", port), state)
+def create_server(
+    state: AppState,
+    port: int = 0,
+    folder_picker: Callable[[], Path | None] = unavailable_folder_picker,
+) -> LabelerHTTPServer:
+    return LabelerHTTPServer(("127.0.0.1", port), state, folder_picker)
 
 
 def build_parser() -> argparse.ArgumentParser:

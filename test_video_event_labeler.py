@@ -449,7 +449,13 @@ class ApiTests(unittest.TestCase):
         self.video.write_bytes(b"test video bytes")
         self.manifest, _ = labeler.import_video_directory(self.root)
         self.state = labeler.AppState.from_paths(self.manifest, self.root)
-        self.server = labeler.create_server(self.state)
+        self.picker_calls = 0
+
+        def picker():
+            self.picker_calls += 1
+            return None
+
+        self.server = labeler.create_server(self.state, folder_picker=picker)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = f"http://127.0.0.1:{self.server.server_port}"
@@ -496,16 +502,16 @@ class ApiTests(unittest.TestCase):
 
         self.assertRegex(body["csv_revision"], r"^[0-9a-f]{64}$")
 
-    def test_import_folder_from_payload(self):
+    def test_import_folder_from_payload_bypasses_picker(self):
         import_root = self.root / "new-video-root"
         video = import_root / "pos" / "fall-pos-002.mp4"
         video.parent.mkdir(parents=True)
         video.write_bytes(b"new video bytes")
 
-        with patch.object(labeler, "choose_video_root", return_value=None):
-            status, body = self.post_import({"video_root": str(import_root)})
+        status, body = self.post_import({"video_root": str(import_root)})
 
         self.assertEqual((status, body["ok"]), (200, True))
+        self.assertEqual(self.picker_calls, 0)
         self.assertTrue(body["ready"])
         self.assertEqual(body["video_root_name"], import_root.name)
         self.assertEqual(body["csv_name"], "video_labeler_manifest.csv")
@@ -520,13 +526,20 @@ class ApiTests(unittest.TestCase):
             ({"video_root": str(self.video)}, "video directory does not exist"),
         ]
 
-        with patch.object(labeler, "choose_video_root", return_value=None):
-            for payload, expected_error in cases:
-                with self.subTest(payload=payload):
-                    status, body = self.post_import(payload)
-                    self.assertEqual((status, body["ok"]), (400, False))
-                    self.assertIn(expected_error, body["error"])
-                    self.assertEqual(self.state.video_root, original_root)
+        for payload, expected_error in cases:
+            with self.subTest(payload=payload):
+                status, body = self.post_import(payload)
+                self.assertEqual((status, body["ok"]), (400, False))
+                self.assertIn(expected_error, body["error"])
+                self.assertEqual(self.state.video_root, original_root)
+                self.assertEqual(self.picker_calls, 0)
+
+    def test_empty_import_uses_injected_picker(self):
+        status, body = self.post_import({})
+
+        self.assertEqual((status, body["ok"]), (400, False))
+        self.assertEqual(body["error"], "no video folder was selected")
+        self.assertEqual(self.picker_calls, 1)
 
     def test_idle_browser_connection_does_not_block_other_requests(self):
         idle_connection = socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2)
@@ -880,28 +893,22 @@ class FolderPickerBrokerTests(unittest.TestCase):
         self.assertRegex(str(outcome["error"]), "系统文件夹选择器不可用")
 
     def test_import_picker_does_not_block_other_http_requests(self):
-        server_holder = {}
-        server_ready = threading.Event()
         picker_started = threading.Event()
         release_picker = threading.Event()
-
-        def serve():
-            server = labeler.create_server(labeler.AppState())
-            server_holder["server"] = server
-            server_ready.set()
-            server.serve_forever()
-
-        server_thread = threading.Thread(target=serve, daemon=True)
-        server_thread.start()
-        self.assertTrue(server_ready.wait(2))
-        server = server_holder["server"]
-        url = f"http://127.0.0.1:{server.server_port}"
-        import_result = {}
 
         def blocking_picker():
             picker_started.set()
             release_picker.wait(3)
             return None
+
+        server = labeler.create_server(
+            labeler.AppState(),
+            folder_picker=blocking_picker,
+        )
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        url = f"http://127.0.0.1:{server.server_port}"
+        import_result = {}
 
         def import_folder():
             request = Request(url + "/api/import-folder", data=b"{}", method="POST")
@@ -916,22 +923,16 @@ class FolderPickerBrokerTests(unittest.TestCase):
 
         import_thread = threading.Thread(target=import_folder, daemon=True)
         try:
-            with patch.object(
-                labeler,
-                "choose_video_root",
-                side_effect=blocking_picker,
-                create=True,
-            ):
-                import_thread.start()
-                self.assertTrue(picker_started.wait(2))
-                try:
-                    with urlopen(url + "/api/status", timeout=1) as response:
-                        status = response.status
-                    status_error = None
-                except Exception as error:
-                    status = None
-                    status_error = error
-                self.assertEqual(status, 200, status_error)
+            import_thread.start()
+            self.assertTrue(picker_started.wait(2))
+            try:
+                with urlopen(url + "/api/status", timeout=1) as response:
+                    status = response.status
+                status_error = None
+            except Exception as error:
+                status = None
+                status_error = error
+            self.assertEqual(status, 200, status_error)
         finally:
             release_picker.set()
             import_thread.join(timeout=4)

@@ -254,7 +254,7 @@ git commit -m "refactor: broker folder picker on main thread"
 - Modify: `test_video_event_labeler.py:440-535`
 - Modify: `test_video_event_labeler.py:918-975`
 
-- [ ] **Step 1: Write failing HTTP injection tests**
+- [x] **Step 1: Write failing HTTP injection tests**
 
 Update `ApiTests.setUp` to create a picker spy and inject it:
 
@@ -292,7 +292,7 @@ def test_empty_import_uses_injected_picker(self):
 
 Update the responsiveness test to pass its `blocking_picker` directly to `create_server` instead of patching module state.
 
-- [ ] **Step 2: Run the focused tests and confirm they fail**
+- [x] **Step 2: Run the focused tests and confirm they fail**
 
 Run:
 
@@ -302,7 +302,7 @@ python -m unittest test_video_event_labeler.ApiTests.test_import_folder_from_pay
 
 Expected: `TypeError` because `create_server` does not yet accept `folder_picker`.
 
-- [ ] **Step 3: Store and use the injected callable**
+- [x] **Step 3: Store and use the injected callable**
 
 Change the server construction path:
 
@@ -332,7 +332,7 @@ root = self.server.folder_picker()
 
 The fallback default preserves simple test/server construction while failing quickly when no GUI runtime is attached.
 
-- [ ] **Step 4: Run focused and complete HTTP tests**
+- [x] **Step 4: Run focused and complete HTTP tests**
 
 Run:
 
@@ -342,7 +342,7 @@ python -m unittest test_video_event_labeler.ApiTests test_video_event_labeler.Fo
 
 Expected: all tests pass, including `/api/status` responsiveness while the injected picker blocks.
 
-- [ ] **Step 5: Commit HTTP injection**
+- [x] **Step 5: Commit HTTP injection**
 
 ```powershell
 git add video_event_labeler.py test_video_event_labeler.py
