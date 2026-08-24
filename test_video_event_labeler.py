@@ -2,7 +2,6 @@ import argparse
 import csv
 import json
 import socket
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -772,152 +771,113 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(rows[0]["end_time"], "0:00:08")
 
 
-class FolderPickerDispatchTests(unittest.TestCase):
-    class TransparentOwnerUser32:
-        def EnumWindows(self, callback, _):
-            callback(100, 0)
+class FakeTkRoot:
+    def __init__(self):
+        self.callbacks = []
 
-        def GetWindowThreadProcessId(self, _, owner):
-            owner._obj.value = 1234
+    def after(self, _delay_ms, callback):
+        self.callbacks.append(callback)
 
-        def IsWindowVisible(self, _):
-            return True
+    def run_next(self):
+        self.callbacks.pop(0)()
 
-        def GetLayeredWindowAttributes(self, _, __, alpha, flags):
-            alpha._obj.value = 0
-            flags._obj.value = 2
-            return True
 
-    class FakePickerProcess:
-        def __init__(self, stdout="", stderr="", communicate_errors=None):
-            self.pid = 1234
-            self.returncode = None
-            self.stdout = stdout
-            self.stderr = stderr
-            self.communicate_errors = list(communicate_errors or [])
-            self.terminated = False
-            self.killed = False
+class FolderPickerBrokerTests(unittest.TestCase):
+    def setUp(self):
+        self.root = FakeTkRoot()
 
-        def poll(self):
-            return self.returncode
+    def choose_in_worker(self, broker):
+        outcome = {}
+        finished = threading.Event()
 
-        def communicate(self, timeout=None):
-            if self.communicate_errors:
-                raise self.communicate_errors.pop(0)
-            if self.returncode is None:
-                self.returncode = 0
-            return self.stdout, self.stderr
-
-        def terminate(self):
-            self.terminated = True
-            self.returncode = -15
-
-        def kill(self):
-            self.killed = True
-            self.returncode = -9
-
-    def test_visible_window_detection_ignores_fully_transparent_owner(self):
-        class FakeWindll:
-            user32 = self.TransparentOwnerUser32()
-
-        with patch.object(labeler.ctypes, "windll", FakeWindll()):
-            visible = labeler._process_has_visible_window(1234)
-
-        self.assertFalse(visible)
-
-    def picker_patches(self, process, visible):
-        return (
-            patch.object(labeler.subprocess, "Popen", return_value=process),
-            patch.object(
-                labeler.subprocess,
-                "run",
-                side_effect=AssertionError("picker must use observable Popen"),
-            ),
-            patch.object(
-                labeler,
-                "_process_has_visible_window",
-                return_value=visible,
-                create=True,
-            ),
-            patch.object(
-                labeler,
-                "PICKER_STARTUP_TIMEOUT_SECONDS",
-                0,
-                create=True,
-            ),
-        )
-
-    def test_windows_picker_terminates_when_no_visible_window_appears(self):
-        process = self.FakePickerProcess()
-        popen, old_run, visible, startup_timeout = self.picker_patches(process, False)
-
-        with popen, old_run, visible, startup_timeout:
-            with self.assertRaisesRegex(ValueError, "系统文件夹选择器不可用"):
-                labeler.choose_video_root()
-
-        self.assertTrue(process.terminated)
-
-    def test_windows_picker_returns_selected_path_after_window_appears(self):
-        process = self.FakePickerProcess(stdout="D:\\videos\r\n")
-        popen, old_run, visible, startup_timeout = self.picker_patches(process, True)
-
-        with popen as start, old_run, visible, startup_timeout:
-            selected = labeler.choose_video_root()
-
-        self.assertEqual(selected, Path("D:/videos"))
-        command = start.call_args.args[0]
-        self.assertEqual(command[:3], ["powershell.exe", "-NoProfile", "-STA"])
-        self.assertIn("FolderBrowserDialog", command[-1])
-        self.assertIn("ShowDialog($owner)", command[-1])
-
-    def test_windows_picker_uses_its_own_topmost_owner(self):
-        process = self.FakePickerProcess()
-        popen, old_run, visible, startup_timeout = self.picker_patches(process, True)
-
-        with (
-            popen as start,
-            old_run,
-            visible,
-            startup_timeout,
-            patch.object(
-                labeler,
-                "_foreground_window_handle",
-                return_value=0,
-                create=True,
-            ),
-        ):
+        def choose():
             try:
-                selected = labeler.choose_video_root()
-            except ValueError as error:
-                self.fail(f"picker must launch without a foreground window: {error}")
+                outcome["result"] = broker.choose()
+            except Exception as error:
+                outcome["error"] = error
+            finally:
+                finished.set()
 
-        self.assertIsNone(selected)
-        start.assert_called_once()
-        script = start.call_args.args[0][-1]
-        for marker in (
-            "System.Windows.Forms.Form",
-            "$owner.ShowInTaskbar=$false",
-            "$owner.Opacity=0",
-            "$owner.TopMost=$true",
-            "$owner.Show()",
-            "$owner.Activate()",
-            "ShowDialog($owner)",
-            "$owner.Dispose()",
-        ):
-            with self.subTest(marker=marker):
-                self.assertIn(marker, script)
+        thread = threading.Thread(target=choose)
+        thread.start()
+        return outcome, finished, thread
 
-    def test_windows_picker_terminates_when_selection_times_out(self):
-        process = self.FakePickerProcess(
-            communicate_errors=[subprocess.TimeoutExpired("powershell.exe", 300)]
-        )
-        popen, old_run, visible, startup_timeout = self.picker_patches(process, True)
+    def wait_for_queued_request(self, broker):
+        for _ in range(100):
+            if not broker.requests.empty():
+                return
+            threading.Event().wait(0.01)
+        self.fail("picker request was not queued")
 
-        with popen, old_run, visible, startup_timeout:
-            with self.assertRaisesRegex(ValueError, "文件夹选择超时"):
-                labeler.choose_video_root()
+    def test_choose_runs_chooser_on_creator_thread_and_returns_path(self):
+        chooser_threads = []
 
-        self.assertTrue(process.terminated)
+        def chooser(**kwargs):
+            chooser_threads.append(threading.get_ident())
+            self.assertIs(kwargs["parent"], self.root)
+            return "D:/videos"
+
+        broker = labeler.TkFolderPickerBroker(self.root, chooser)
+        outcome, finished, thread = self.choose_in_worker(broker)
+        self.wait_for_queued_request(broker)
+
+        self.root.run_next()
+
+        self.assertTrue(finished.wait(1))
+        thread.join(1)
+        self.assertEqual(outcome["result"], Path("D:/videos"))
+        self.assertEqual(chooser_threads, [threading.get_ident()])
+
+    def test_cancel_returns_none(self):
+        broker = labeler.TkFolderPickerBroker(self.root, lambda **_: "")
+        outcome, finished, thread = self.choose_in_worker(broker)
+        self.wait_for_queued_request(broker)
+
+        self.root.run_next()
+
+        self.assertTrue(finished.wait(1))
+        thread.join(1)
+        self.assertIsNone(outcome["result"])
+
+    def test_chooser_error_points_to_manual_path_import(self):
+        def fail(**_):
+            raise RuntimeError("desktop unavailable")
+
+        broker = labeler.TkFolderPickerBroker(self.root, fail)
+        outcome, finished, thread = self.choose_in_worker(broker)
+        self.wait_for_queued_request(broker)
+
+        self.root.run_next()
+
+        self.assertTrue(finished.wait(1))
+        thread.join(1)
+        self.assertRegex(str(outcome["error"]), "系统文件夹选择器不可用.*按路径导入")
+
+    def test_second_concurrent_request_fails_immediately(self):
+        broker = labeler.TkFolderPickerBroker(self.root, lambda **_: "")
+        first, first_done, first_thread = self.choose_in_worker(broker)
+        self.wait_for_queued_request(broker)
+
+        second, second_done, second_thread = self.choose_in_worker(broker)
+
+        self.assertTrue(second_done.wait(1))
+        self.assertRegex(str(second["error"]), "文件夹选择器已打开")
+        self.root.run_next()
+        self.assertTrue(first_done.wait(1))
+        first_thread.join(1)
+        second_thread.join(1)
+        self.assertIsNone(first["result"])
+
+    def test_close_releases_waiting_request(self):
+        broker = labeler.TkFolderPickerBroker(self.root, lambda **_: "")
+        outcome, finished, thread = self.choose_in_worker(broker)
+        self.wait_for_queued_request(broker)
+
+        broker.close()
+
+        self.assertTrue(finished.wait(1))
+        thread.join(1)
+        self.assertRegex(str(outcome["error"]), "系统文件夹选择器不可用")
 
     def test_import_picker_does_not_block_other_http_requests(self):
         server_holder = {}
@@ -956,7 +916,12 @@ class FolderPickerDispatchTests(unittest.TestCase):
 
         import_thread = threading.Thread(target=import_folder, daemon=True)
         try:
-            with patch.object(labeler, "choose_video_root", side_effect=blocking_picker):
+            with patch.object(
+                labeler,
+                "choose_video_root",
+                side_effect=blocking_picker,
+                create=True,
+            ):
                 import_thread.start()
                 self.assertTrue(picker_started.wait(2))
                 try:

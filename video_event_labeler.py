@@ -5,18 +5,17 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import csv
 import hashlib
 import json
 import mimetypes
 import os
+import queue
 import re
 import shutil
-import subprocess
 import tempfile
 import threading
-import time
+from collections.abc import Callable
 from datetime import datetime
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -77,9 +76,6 @@ EVENT_PATTERN = re.compile(
 )
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}
 VIDEO_READ_CHUNK_SIZE = 1024 * 1024
-PICKER_STARTUP_TIMEOUT_SECONDS = 3.0
-PICKER_SELECTION_TIMEOUT_SECONDS = 300.0
-PICKER_POLL_INTERVAL_SECONDS = 0.1
 MANIFEST_FIELDS = [
     "sample_id",
     "video_path",
@@ -762,133 +758,88 @@ def _update_row(state: AppState, payload: dict[str, object]) -> dict[str, object
     }
 
 
-def _choose_video_root_tk() -> Path | None:
-    """Use Tk as a fallback on platforms without the Windows dialog."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        window = tk.Tk()
-        window.withdraw()
-        window.attributes("-topmost", True)
-        selected = filedialog.askdirectory(title="选择视频文件夹")
-        window.destroy()
-        return Path(selected) if selected else None
-    except Exception as error:  # pragma: no cover - depends on desktop availability
-        raise ValueError(f"folder picker is unavailable: {error}") from error
+PICKER_UNAVAILABLE_MESSAGE = (
+    "系统文件夹选择器不可用，请在路径框中输入视频目录并点击“按路径导入”"
+)
 
 
-def _process_has_visible_window(process_id: int) -> bool:
-    """Return whether a Windows process owns a visible top-level window."""
-    if os.name != "nt":
-        return False
-    try:
-        user32 = ctypes.windll.user32
-        found = False
-        callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-
-        def inspect_window(window: int, _: int) -> bool:
-            nonlocal found
-            owner = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(window, ctypes.byref(owner))
-            if owner.value == process_id and user32.IsWindowVisible(window):
-                alpha = ctypes.c_ubyte(255)
-                flags = ctypes.c_ulong()
-                is_layered = user32.GetLayeredWindowAttributes(
-                    window, None, ctypes.byref(alpha), ctypes.byref(flags)
-                )
-                if is_layered and flags.value & 0x2 and alpha.value == 0:
-                    return True
-                found = True
-                return False
-            return True
-
-        user32.EnumWindows(callback_type(inspect_window), 0)
-        return found
-    except (AttributeError, OSError):
-        return False
+@dataclass
+class _PickerRequest:
+    done: threading.Event = field(default_factory=threading.Event)
+    result: Path | None = None
+    error: Exception | None = None
 
 
-def _terminate_picker_process(process: subprocess.Popen[str]) -> tuple[str, str]:
-    """Terminate and reap a picker process without leaving it orphaned."""
-    try:
-        process.terminate()
-    except OSError:
-        pass
-    try:
-        return process.communicate(timeout=2)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return process.communicate(timeout=2)
+class TkFolderPickerBroker:
+    def __init__(
+        self,
+        root: object,
+        chooser: Callable[..., str],
+        poll_interval_ms: int = 25,
+    ):
+        self.root = root
+        self.chooser = chooser
+        self.poll_interval_ms = poll_interval_ms
+        self.owner_thread_id = threading.get_ident()
+        self.requests: queue.Queue[_PickerRequest] = queue.Queue()
+        self.request_lock = threading.Lock()
+        self.state_lock = threading.Lock()
+        self.closed = False
+        self.pending: _PickerRequest | None = None
+        self.root.after(self.poll_interval_ms, self._poll)
 
+    def choose(self) -> Path | None:
+        if not self.request_lock.acquire(blocking=False):
+            raise ValueError("文件夹选择器已打开，请先完成当前选择")
+        request = _PickerRequest()
+        try:
+            with self.state_lock:
+                if self.closed:
+                    raise ValueError(PICKER_UNAVAILABLE_MESSAGE)
+                self.pending = request
+                self.requests.put(request)
+            request.done.wait()
+            if request.error is not None:
+                raise ValueError(PICKER_UNAVAILABLE_MESSAGE) from request.error
+            return request.result
+        finally:
+            self.request_lock.release()
 
-def choose_video_root() -> Path | None:
-    """Open a desktop folder picker without requiring Tk in the HTTP process."""
-    if os.name != "nt":
-        return _choose_video_root_tk()
+    def _poll(self) -> None:
+        if threading.get_ident() != self.owner_thread_id:
+            raise RuntimeError("folder picker broker must be polled on its creator thread")
+        try:
+            request = self.requests.get_nowait()
+        except queue.Empty:
+            request = None
+        if request is not None and not request.done.is_set():
+            try:
+                selected = self.chooser(parent=self.root, title="选择视频文件夹")
+                result = Path(selected) if selected else None
+                picker_error = None
+            except Exception as error:
+                result = None
+                picker_error = error
+            with self.state_lock:
+                if not request.done.is_set():
+                    request.result = result
+                    request.error = picker_error
+                    request.done.set()
+                if self.pending is request:
+                    self.pending = None
+        with self.state_lock:
+            should_poll = not self.closed
+        if should_poll:
+            self.root.after(self.poll_interval_ms, self._poll)
 
-    dialog_script = (
-        "Add-Type -AssemblyName System.Windows.Forms;"
-        "Add-Type -AssemblyName System.Drawing;"
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-        "$owner=New-Object System.Windows.Forms.Form;"
-        "$owner.ShowInTaskbar=$false;"
-        "$owner.FormBorderStyle=[System.Windows.Forms.FormBorderStyle]::FixedToolWindow;"
-        "$owner.StartPosition=[System.Windows.Forms.FormStartPosition]::CenterScreen;"
-        "$owner.Size=New-Object System.Drawing.Size(1,1);"
-        "$owner.Opacity=0;"
-        "$owner.TopMost=$true;"
-        "$dialog=New-Object System.Windows.Forms.FolderBrowserDialog;"
-        "$dialog.Description='选择视频文件夹';"
-        "$dialog.ShowNewFolderButton=$false;"
-        "try{$owner.Show();$owner.Activate();"
-        "$result=$dialog.ShowDialog($owner);"
-        "if($result -eq [System.Windows.Forms.DialogResult]::OK) "
-        "{[Console]::WriteLine($dialog.SelectedPath)}}"
-        "finally{$dialog.Dispose();$owner.Close();$owner.Dispose()}"
-    )
-    command = ["powershell.exe", "-NoProfile", "-STA", "-Command", dialog_script]
-    try:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except OSError as error:
-        raise ValueError(f"folder picker is unavailable: {error}") from error
-
-    deadline = time.monotonic() + PICKER_STARTUP_TIMEOUT_SECONDS
-    visible = False
-    while process.poll() is None:
-        if _process_has_visible_window(process.pid):
-            visible = True
-            break
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(PICKER_POLL_INTERVAL_SECONDS)
-
-    if process.poll() is None and not visible:
-        _terminate_picker_process(process)
-        raise ValueError(
-            "系统文件夹选择器不可用，请在路径框中输入视频目录并点击“按路径导入”"
-        )
-
-    try:
-        stdout, stderr = process.communicate(
-            timeout=PICKER_SELECTION_TIMEOUT_SECONDS if visible else 2
-        )
-    except subprocess.TimeoutExpired as error:
-        _terminate_picker_process(process)
-        raise ValueError("文件夹选择超时，请重试或使用“按路径导入”") from error
-
-    if process.returncode != 0:
-        detail = stderr.strip() or f"exit code {process.returncode}"
-        raise ValueError(f"folder picker is unavailable: {detail}")
-    selected = stdout.strip()
-    return Path(selected) if selected else None
+    def close(self) -> None:
+        with self.state_lock:
+            self.closed = True
+            request = self.pending
+            self.pending = None
+            if request is not None and not request.done.is_set():
+                request.error = RuntimeError("folder picker broker is closed")
+                request.done.set()
 
 
 HTML = r"""<!doctype html>

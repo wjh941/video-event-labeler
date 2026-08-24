@@ -27,7 +27,7 @@
 - Modify: `test_video_event_labeler.py:1-15`
 - Replace: `test_video_event_labeler.py:775-918`
 
-- [ ] **Step 1: Write failing broker tests**
+- [x] **Step 1: Write failing broker tests**
 
 Replace the PowerShell-specific `FolderPickerDispatchTests` with fake-root tests that cover selection, cancellation, chooser failure, thread ownership, concurrent calls, and shutdown:
 
@@ -130,7 +130,7 @@ class FolderPickerBrokerTests(unittest.TestCase):
         self.assertRegex(str(outcome["error"]), "系统文件夹选择器不可用")
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm they fail**
+- [x] **Step 2: Run the focused tests and confirm they fail**
 
 Run:
 
@@ -140,7 +140,7 @@ python -m unittest test_video_event_labeler.FolderPickerBrokerTests -v
 
 Expected: `ERROR` because `TkFolderPickerBroker` does not exist yet.
 
-- [ ] **Step 3: Implement the broker and remove the PowerShell path**
+- [x] **Step 3: Implement the broker and remove the PowerShell path**
 
 Remove `ctypes`, `subprocess`, `time`, picker timeout constants, `_choose_video_root_tk`, `_process_has_visible_window`, `_terminate_picker_process`, and `choose_video_root`. Add `queue` and these broker types near the former picker code:
 
@@ -226,7 +226,7 @@ class TkFolderPickerBroker:
 
 Use `Callable[..., str]` for the chooser annotation. Keep `request_lock` held for the whole request lifetime so a second request fails immediately; use `state_lock` to make queue registration and `close()` atomic. Catch `Exception`, not `BaseException`, in the final implementation so `KeyboardInterrupt` and `SystemExit` are not hidden.
 
-- [ ] **Step 4: Run the broker tests and the import/static checks**
+- [x] **Step 4: Run the broker tests and the import/static checks**
 
 Run:
 
@@ -238,7 +238,7 @@ rg -n "powershell|subprocess|ctypes|PICKER_.*TIMEOUT|choose_video_root" video_ev
 
 Expected: broker tests pass, compilation succeeds, and `rg` prints no matches.
 
-- [ ] **Step 5: Commit the broker core**
+- [x] **Step 5: Commit the broker core**
 
 ```powershell
 git add video_event_labeler.py test_video_event_labeler.py
