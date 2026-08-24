@@ -1,6 +1,8 @@
 import argparse
 import csv
 import json
+import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -472,6 +474,19 @@ class ApiTests(unittest.TestCase):
         except HTTPError as error:
             return error.code, json.load(error)
 
+    def post_import(self, payload):
+        request = Request(
+            self.url + "/api/import-folder",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.load(response)
+        except HTTPError as error:
+            return error.code, json.load(error)
+
     def read_event_row(self):
         rows, _ = labeler.read_csv_rows(self.manifest, "utf-8-sig")
         return rows[0]
@@ -481,6 +496,64 @@ class ApiTests(unittest.TestCase):
             body = json.load(response)
 
         self.assertRegex(body["csv_revision"], r"^[0-9a-f]{64}$")
+
+    def test_import_folder_from_payload(self):
+        import_root = self.root / "new-video-root"
+        video = import_root / "pos" / "fall-pos-002.mp4"
+        video.parent.mkdir(parents=True)
+        video.write_bytes(b"new video bytes")
+
+        with patch.object(labeler, "choose_video_root", return_value=None):
+            status, body = self.post_import({"video_root": str(import_root)})
+
+        self.assertEqual((status, body["ok"]), (200, True))
+        self.assertTrue(body["ready"])
+        self.assertEqual(body["video_root_name"], import_root.name)
+        self.assertEqual(body["csv_name"], "video_labeler_manifest.csv")
+        self.assertEqual(self.state.video_root, import_root.resolve())
+        self.assertTrue((import_root / "video_labeler_manifest.csv").is_file())
+
+    def test_import_folder_rejects_invalid_paths_without_changing_state(self):
+        original_root = self.state.video_root
+        cases = [
+            ({"video_root": "   "}, "video_root is required"),
+            ({"video_root": str(self.root / "missing-root")}, "video directory does not exist"),
+            ({"video_root": str(self.video)}, "video directory does not exist"),
+        ]
+
+        with patch.object(labeler, "choose_video_root", return_value=None):
+            for payload, expected_error in cases:
+                with self.subTest(payload=payload):
+                    status, body = self.post_import(payload)
+                    self.assertEqual((status, body["ok"]), (400, False))
+                    self.assertIn(expected_error, body["error"])
+                    self.assertEqual(self.state.video_root, original_root)
+
+    def test_idle_browser_connection_does_not_block_other_requests(self):
+        idle_connection = socket.create_connection(("127.0.0.1", self.server.server_port), timeout=2)
+        finished = threading.Event()
+        result = {}
+
+        def request_status():
+            try:
+                with urlopen(self.url + "/api/status", timeout=2) as response:
+                    result["status"] = response.status
+            except Exception as error:  # pragma: no cover - assertion reports the actual error
+                result["error"] = error
+            finally:
+                finished.set()
+
+        request_thread = threading.Thread(target=request_status, daemon=True)
+        request_thread.start()
+        try:
+            self.assertTrue(
+                finished.wait(1),
+                "an idle browser connection must not block the HTTP server",
+            )
+            self.assertEqual(result.get("status"), 200, result.get("error"))
+        finally:
+            idle_connection.close()
+            request_thread.join(timeout=3)
 
     def test_stale_revision_returns_409_without_overwriting_external_change(self):
         revision = self.state.status()["csv_revision"]
@@ -697,6 +770,78 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(fields, ["sample_id", "video_path", "start_time", "end_time"])
         self.assertEqual(rows[0]["end_time"], "0:00:08")
+
+
+class FolderPickerDispatchTests(unittest.TestCase):
+    def test_folder_picker_uses_windows_native_dialog_process(self):
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="D:\\videos\r\n",
+            stderr="",
+        )
+        with patch.object(labeler.subprocess, "run", return_value=completed) as run:
+            selected = labeler.choose_video_root()
+
+        self.assertEqual(selected, Path("D:/videos"))
+        command = run.call_args.args[0]
+        self.assertEqual(command[:3], ["powershell.exe", "-NoProfile", "-STA"])
+        self.assertIn("FolderBrowserDialog", command[-1])
+
+    def test_import_picker_does_not_block_other_http_requests(self):
+        server_holder = {}
+        server_ready = threading.Event()
+        picker_started = threading.Event()
+        release_picker = threading.Event()
+
+        def serve():
+            server = labeler.create_server(labeler.AppState())
+            server_holder["server"] = server
+            server_ready.set()
+            server.serve_forever()
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+        self.assertTrue(server_ready.wait(2))
+        server = server_holder["server"]
+        url = f"http://127.0.0.1:{server.server_port}"
+        import_result = {}
+
+        def blocking_picker():
+            picker_started.set()
+            release_picker.wait(3)
+            return None
+
+        def import_folder():
+            request = Request(url + "/api/import-folder", data=b"{}", method="POST")
+            try:
+                with urlopen(request, timeout=5) as response:
+                    import_result["status"] = response.status
+            except HTTPError as error:
+                error.close()
+                import_result["error"] = error
+            except Exception as error:  # pragma: no cover - cleanup releases the picker
+                import_result["error"] = error
+
+        import_thread = threading.Thread(target=import_folder, daemon=True)
+        try:
+            with patch.object(labeler, "choose_video_root", side_effect=blocking_picker):
+                import_thread.start()
+                self.assertTrue(picker_started.wait(2))
+                try:
+                    with urlopen(url + "/api/status", timeout=1) as response:
+                        status = response.status
+                    status_error = None
+                except Exception as error:
+                    status = None
+                    status_error = error
+                self.assertEqual(status, 200, status_error)
+        finally:
+            release_picker.set()
+            import_thread.join(timeout=4)
+            server.shutdown()
+            server_thread.join(timeout=4)
+            server.server_close()
 
 
 class HtmlContractTests(unittest.TestCase):

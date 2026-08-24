@@ -12,11 +12,12 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 from datetime import datetime
 from dataclasses import dataclass, field
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -635,6 +636,22 @@ class AppState:
         }
 
 
+def apply_imported_root(state: AppState, root: Path) -> tuple[Path, int]:
+    """Import a directory and publish its manifest only after it is valid."""
+    root = root.expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"video directory does not exist: {root}")
+    manifest, added = import_video_directory(root, backups=state.backups)
+    encoding = detect_encoding(manifest)
+    rows, fieldnames = read_csv_rows(manifest, encoding)
+    with state.lock:
+        state.csv_path = manifest.resolve()
+        state.video_root = root
+        state.csv_encoding = encoding
+        state._set_snapshot_unlocked(rows, fieldnames)
+    return manifest, added
+
+
 def safe_video_path(root: Path, relative: str) -> Path | None:
     """Resolve a browser video path only when it remains under the configured root."""
     if not relative:
@@ -740,8 +757,8 @@ def _update_row(state: AppState, payload: dict[str, object]) -> dict[str, object
     }
 
 
-def choose_video_root() -> Path | None:
-    """Open the native folder picker only when the user requests importing."""
+def _choose_video_root_tk() -> Path | None:
+    """Use Tk as a fallback on platforms without the Windows dialog."""
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -754,6 +771,40 @@ def choose_video_root() -> Path | None:
         return Path(selected) if selected else None
     except Exception as error:  # pragma: no cover - depends on desktop availability
         raise ValueError(f"folder picker is unavailable: {error}") from error
+
+
+def choose_video_root() -> Path | None:
+    """Open a desktop folder picker without requiring Tk in the HTTP process."""
+    if os.name != "nt":
+        return _choose_video_root_tk()
+
+    dialog_script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+        "$dialog=New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$dialog.Description='选择视频文件夹';"
+        "$dialog.ShowNewFolderButton=$false;"
+        "$result=$dialog.ShowDialog();"
+        "if($result -eq [System.Windows.Forms.DialogResult]::OK) "
+        "{ [Console]::WriteLine($dialog.SelectedPath) }"
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-STA", "-Command", dialog_script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"folder picker is unavailable: {error}") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit code {completed.returncode}"
+        raise ValueError(f"folder picker is unavailable: {detail}")
+    selected = completed.stdout.strip()
+    return Path(selected) if selected else None
 
 
 HTML = r"""<!doctype html>
@@ -1029,7 +1080,7 @@ def _normalize_html(html: str) -> str:
 HTML = _normalize_html(HTML)
 
 
-class LabelerHTTPServer(HTTPServer):
+class LabelerHTTPServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], state: AppState):
         super().__init__(address, Handler)
         self.state = state
@@ -1167,19 +1218,26 @@ class Handler(BaseHTTPRequestHandler):
             return
         if request_path == "/api/import-folder":
             try:
-                root = choose_video_root()
+                length = int(self.headers.get("Content-Length", "0"))
+                raw_body = self.rfile.read(length)
+                payload: dict[str, object] = {}
+                if raw_body.strip():
+                    decoded = json.loads(raw_body.decode("utf-8"))
+                    if not isinstance(decoded, dict):
+                        raise ValueError("request body must be an object")
+                    payload = decoded
+                if "video_root" in payload:
+                    raw_root = payload["video_root"]
+                    if not isinstance(raw_root, str) or not raw_root.strip():
+                        raise ValueError("video_root is required")
+                    root = Path(raw_root.strip())
+                else:
+                    root = choose_video_root()
                 if root is None:
                     raise ValueError("no video folder was selected")
-                manifest, added = import_video_directory(root, backups=self.server.state.backups)
-                with self.server.state.lock:
-                    self.server.state.csv_path = manifest.resolve()
-                    self.server.state.video_root = root.resolve()
-                    self.server.state.csv_encoding = detect_encoding(manifest)
-                    self.server.state._set_snapshot_unlocked(
-                        *read_csv_rows(manifest, self.server.state.csv_encoding)
-                    )
+                manifest, added = apply_imported_root(self.server.state, root)
                 self.send_json(200, {"ok": True, "added": added, **self.server.state.status()})
-            except (ValueError, OSError) as error:
+            except (ValueError, OSError, json.JSONDecodeError) as error:
                 self.send_json(400, {"ok": False, "error": str(error)})
             return
         self.send_error(404)
