@@ -1008,6 +1008,25 @@ class ApplicationLifecycleTests(unittest.TestCase):
         self.assertTrue(server.closed)
         self.assertTrue(root.destroyed)
 
+    def test_run_desktop_app_cleans_up_when_startup_output_fails(self):
+        server = self.FakeServer()
+        root = self.FakeRoot(server.started)
+        broker = self.FakeBroker()
+
+        with patch.object(
+            labeler,
+            "print_startup",
+            side_effect=BrokenPipeError("stdout closed"),
+        ):
+            with self.assertRaisesRegex(BrokenPipeError, "stdout closed"):
+                labeler.run_desktop_app(labeler.AppState(), root, broker, server)
+
+        self.assertTrue(server.started.is_set())
+        self.assertTrue(broker.closed)
+        self.assertTrue(server.shutdown_called)
+        self.assertTrue(server.closed)
+        self.assertTrue(root.destroyed)
+
     def test_main_uses_headless_server_when_tk_initialization_fails(self):
         args = argparse.Namespace(video_root=None, csv=None, port=8765)
         state = labeler.AppState()

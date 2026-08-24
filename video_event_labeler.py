@@ -1353,20 +1353,23 @@ def run_desktop_app(
     server: LabelerHTTPServer,
 ) -> None:
     server_thread = threading.Thread(target=server.serve_forever, name="labeler-http")
-    server_thread.start()
-    print_startup(server, state)
+    server_started = False
     try:
+        server_thread.start()
+        server_started = True
+        print_startup(server, state)
         root.mainloop()
     except KeyboardInterrupt:
         pass
     finally:
         broker.close()
-        server.shutdown()
-        server_thread.join(timeout=5)
+        if server_started:
+            server.shutdown()
+            server_thread.join(timeout=5)
         server.server_close()
         root.destroy()
-    if server_thread.is_alive():
-        raise RuntimeError("HTTP server did not stop cleanly")
+        if server_started and server_thread.is_alive():
+            raise RuntimeError("HTTP server did not stop cleanly")
 
 
 def run_headless_app(state: AppState, port: int) -> None:

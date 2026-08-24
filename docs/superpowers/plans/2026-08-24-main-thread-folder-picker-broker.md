@@ -516,7 +516,7 @@ git commit -m "fix: run native folder picker on main thread"
 - Verify: `test_video_event_labeler.py`
 - Verify: `docs/superpowers/specs/2026-08-24-main-thread-folder-picker-broker-design.md`
 
-- [ ] **Step 1: Run the complete automated suite**
+- [x] **Step 1: Run the complete automated suite**
 
 Run:
 
@@ -529,7 +529,7 @@ git diff --check
 
 Expected: all tests pass, Python compiles, embedded JavaScript parses, and whitespace checks are clean.
 
-- [ ] **Step 2: Prove the retired implementation is gone**
+- [x] **Step 2: Prove the retired implementation is gone**
 
 Run:
 
@@ -539,7 +539,7 @@ rg -n "powershell|FolderBrowserDialog|subprocess|_process_has_visible_window|_te
 
 Expected: no matches.
 
-- [ ] **Step 3: Run a bounded real Windows dialog diagnostic**
+- [x] **Step 3: Run a bounded real Windows dialog diagnostic**
 
 Start the updated application on a free local port, open `/api/import-folder`, and use a diagnostic-only Win32 helper to post `WM_CLOSE` to the Tk directory dialog after it appears. Verify all of the following within 10 seconds:
 
@@ -553,11 +553,11 @@ GET /api/status after cancellation: 200
 
 Stop the diagnostic application cleanly after the assertions. This helper stays outside production code and is not committed.
 
-- [ ] **Step 4: Restart the user-facing session and smoke-test it**
+- [x] **Step 4: Restart the user-facing session and smoke-test it**
 
 Stop only the existing labeler process on port `8765`, start the updated `video_event_labeler.py --port 8765`, wait for `/api/status` to return `200`, and open `http://127.0.0.1:8765/` in the browser. Manually confirm that selection and cancellation both restore the Import button.
 
-- [ ] **Step 5: Review the final diff and commit any verification-only test adjustments**
+- [x] **Step 5: Review the final diff and commit any verification-only test adjustments**
 
 Run:
 
