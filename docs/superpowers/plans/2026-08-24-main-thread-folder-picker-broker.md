@@ -574,7 +574,7 @@ git add test_video_event_labeler.py
 git commit -m "test: cover main-thread folder picker lifecycle"
 ```
 
-- [ ] **Step 6: Push the verified commits**
+- [x] **Step 6: Push the verified commits**
 
 Run:
 
