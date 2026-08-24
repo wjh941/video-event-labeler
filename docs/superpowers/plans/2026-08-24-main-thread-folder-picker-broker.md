@@ -357,7 +357,7 @@ git commit -m "refactor: inject folder picker into server"
 - Modify: `video_event_labeler.py:1355-1410`
 - Append: `test_video_event_labeler.py` before `HtmlContractTests`
 
-- [ ] **Step 1: Write failing lifecycle tests with fakes**
+- [x] **Step 1: Write failing lifecycle tests with fakes**
 
 Add a fake root and server that capture thread IDs and cleanup calls:
 
@@ -433,7 +433,7 @@ def test_main_falls_back_to_http_when_tk_initialization_fails(self):
     run_headless.assert_called_once()
 ```
 
-- [ ] **Step 2: Run lifecycle tests and confirm they fail**
+- [x] **Step 2: Run lifecycle tests and confirm they fail**
 
 Run:
 
@@ -443,7 +443,7 @@ python -m unittest test_video_event_labeler.ApplicationLifecycleTests -v
 
 Expected: `AttributeError` because the lifecycle helpers do not exist.
 
-- [ ] **Step 3: Implement Tk creation and explicit lifecycle helpers**
+- [x] **Step 3: Implement Tk creation and explicit lifecycle helpers**
 
 Add:
 
@@ -490,7 +490,7 @@ Extract current console output to `print_startup(server, state)`. Update `main()
 
 In `run_desktop_app`, use a bounded `join(timeout=5)` followed by a clear `RuntimeError` if the HTTP thread remains alive; tests must not permit a silent orphan thread.
 
-- [ ] **Step 4: Run lifecycle, picker, and HTTP tests**
+- [x] **Step 4: Run lifecycle, picker, and HTTP tests**
 
 Run:
 
@@ -500,7 +500,7 @@ python -m unittest test_video_event_labeler.ApplicationLifecycleTests test_video
 
 Expected: all focused suites pass and the recorded Tk thread differs from the HTTP thread.
 
-- [ ] **Step 5: Commit the lifecycle change**
+- [x] **Step 5: Commit the lifecycle change**
 
 ```powershell
 git add video_event_labeler.py test_video_event_labeler.py

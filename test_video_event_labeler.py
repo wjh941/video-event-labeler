@@ -1,10 +1,12 @@
 import argparse
 import csv
+import io
 import json
 import socket
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 from pathlib import Path
 from urllib.error import HTTPError
@@ -939,6 +941,94 @@ class FolderPickerBrokerTests(unittest.TestCase):
             server.shutdown()
             server_thread.join(timeout=4)
             server.server_close()
+
+
+class ApplicationLifecycleTests(unittest.TestCase):
+    class FakeServer:
+        server_port = 8765
+
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.serve_thread_id = None
+            self.shutdown_called = False
+            self.closed = False
+
+        def serve_forever(self):
+            self.serve_thread_id = threading.get_ident()
+            self.started.set()
+            self.release.wait(2)
+
+        def shutdown(self):
+            self.shutdown_called = True
+            self.release.set()
+
+        def server_close(self):
+            self.closed = True
+
+    class FakeRoot:
+        def __init__(self, server_started):
+            self.server_started = server_started
+            self.mainloop_thread_id = None
+            self.destroyed = False
+
+        def mainloop(self):
+            self.assert_server_started()
+            self.mainloop_thread_id = threading.get_ident()
+
+        def assert_server_started(self):
+            if not self.server_started.wait(1):
+                raise AssertionError("HTTP server did not start before Tk mainloop")
+
+        def destroy(self):
+            self.destroyed = True
+
+    class FakeBroker:
+        def __init__(self):
+            self.closed = False
+
+        def choose(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    def test_run_desktop_app_keeps_tk_on_main_thread_and_cleans_up(self):
+        server = self.FakeServer()
+        root = self.FakeRoot(server.started)
+        broker = self.FakeBroker()
+
+        with redirect_stdout(io.StringIO()):
+            labeler.run_desktop_app(labeler.AppState(), root, broker, server)
+
+        self.assertEqual(root.mainloop_thread_id, threading.get_ident())
+        self.assertNotEqual(server.serve_thread_id, threading.get_ident())
+        self.assertTrue(broker.closed)
+        self.assertTrue(server.shutdown_called)
+        self.assertTrue(server.closed)
+        self.assertTrue(root.destroyed)
+
+    def test_main_uses_headless_server_when_tk_initialization_fails(self):
+        args = argparse.Namespace(video_root=None, csv=None, port=8765)
+        state = labeler.AppState()
+        fallback = {}
+
+        def run_headless(actual_state, port):
+            fallback["state"] = actual_state
+            fallback["port"] = port
+
+        with (
+            patch.object(labeler, "build_parser") as build_parser,
+            patch.object(labeler, "build_state_from_args", return_value=state),
+            patch.object(labeler, "create_tk_picker", side_effect=RuntimeError("no desktop")),
+            patch.object(labeler, "run_headless_app", side_effect=run_headless),
+        ):
+            build_parser.return_value.parse_args.return_value = args
+            with redirect_stdout(io.StringIO()):
+                labeler.main()
+
+        self.assertIs(fallback["state"], state)
+        self.assertEqual(fallback["port"], 8765)
 
 
 class HtmlContractTests(unittest.TestCase):
