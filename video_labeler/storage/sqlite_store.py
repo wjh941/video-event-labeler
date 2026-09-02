@@ -11,6 +11,7 @@ from typing import Iterator, Sequence
 
 from ..domain import Event, Person, Sample
 from ..schema import migrate_schema
+from .file_lock import FileLock
 
 
 class StorageError(RuntimeError):
@@ -38,8 +39,10 @@ class SQLiteStore:
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(str(self.path), timeout=5.0, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._savepoint_counter = 0
         self._configure_connection()
-        migrate_schema(self._connection)
+        with FileLock(self.path.with_name(self.path.name + ".lock")):
+            migrate_schema(self._connection)
 
     def _configure_connection(self) -> None:
         connection = self._connection
@@ -61,17 +64,27 @@ class SQLiteStore:
     def transaction(self) -> Iterator[sqlite3.Connection]:
         with self._lock:
             outer = not self._connection.in_transaction
+            savepoint = None
             if outer:
                 self._connection.execute("BEGIN IMMEDIATE")
+            else:
+                self._savepoint_counter += 1
+                savepoint = f"sp_{self._savepoint_counter}"
+                self._connection.execute(f"SAVEPOINT {savepoint}")
             try:
                 yield self._connection
             except Exception:
                 if outer and self._connection.in_transaction:
                     self._connection.rollback()
+                elif savepoint is not None:
+                    self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                 raise
             else:
                 if outer and self._connection.in_transaction:
                     self._connection.commit()
+                elif savepoint is not None:
+                    self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
 
     def upsert_dataset(self, dataset_id: str, root_path: str) -> None:
         try:
@@ -109,23 +122,26 @@ class SQLiteStore:
                       created_at=row["created_at"], updated_at=row["updated_at"], revision=row["revision"])
 
     def get_sample(self, sample_id: str) -> Sample | None:
-        row = self._connection.execute("SELECT * FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
-        return self._sample_from_row(row) if row else None
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
+            return self._sample_from_row(row) if row else None
 
     def list_samples(self, limit: int, offset: int, status: str | None = None) -> list[Sample]:
         if limit < 0 or offset < 0:
             raise ValueError("limit and offset must be non-negative")
-        if status is None:
-            rows = self._connection.execute("SELECT * FROM samples ORDER BY sample_id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
-        else:
-            rows = self._connection.execute("SELECT * FROM samples WHERE status = ? ORDER BY sample_id LIMIT ? OFFSET ?", (status, limit, offset)).fetchall()
-        return [self._sample_from_row(row) for row in rows]
+        with self._lock:
+            if status is None:
+                rows = self._connection.execute("SELECT * FROM samples ORDER BY sample_id LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+            else:
+                rows = self._connection.execute("SELECT * FROM samples WHERE status = ? ORDER BY sample_id LIMIT ? OFFSET ?", (status, limit, offset)).fetchall()
+            return [self._sample_from_row(row) for row in rows]
 
     def sample_revision(self, sample_id: str) -> int:
-        row = self._connection.execute("SELECT revision FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
-        if row is None:
-            raise KeyError(f"unknown sample: {sample_id}")
-        return int(row[0])
+        with self._lock:
+            row = self._connection.execute("SELECT revision FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
+            if row is None:
+                raise KeyError(f"unknown sample: {sample_id}")
+            return int(row[0])
 
     def _check_revision(self, connection: sqlite3.Connection, sample_id: str, expected_revision: int | None) -> int:
         row = connection.execute("SELECT revision FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
@@ -174,9 +190,11 @@ class SQLiteStore:
             raise StorageError(f"person replacement failed: {exc}") from exc
 
     def get_events(self, sample_id: str) -> list[Event]:
-        rows = self._connection.execute("SELECT * FROM events WHERE sample_id = ? ORDER BY event_id", (sample_id,)).fetchall()
-        return [Event(sample_id=row["sample_id"], event_type=row["event_type"], start_time_ms=row["start_time_ms"], end_time_ms=row["end_time_ms"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], event_id=row["event_id"]) for row in rows]
+        with self._lock:
+            rows = self._connection.execute("SELECT * FROM events WHERE sample_id = ? ORDER BY event_id", (sample_id,)).fetchall()
+            return [Event(sample_id=row["sample_id"], event_type=row["event_type"], start_time_ms=row["start_time_ms"], end_time_ms=row["end_time_ms"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], event_id=row["event_id"]) for row in rows]
 
     def get_persons(self, sample_id: str) -> list[Person]:
-        rows = self._connection.execute("SELECT * FROM persons WHERE sample_id = ? ORDER BY person_id", (sample_id,)).fetchall()
-        return [Person(sample_id=row["sample_id"], person_id=row["person_id"], age_group=row["age_group"], face_familiarity=row["face_familiarity"], body_reid_familiarity=row["body_reid_familiarity"], track_id=row["track_id"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], person_record_id=row["person_record_id"]) for row in rows]
+        with self._lock:
+            rows = self._connection.execute("SELECT * FROM persons WHERE sample_id = ? ORDER BY person_id", (sample_id,)).fetchall()
+            return [Person(sample_id=row["sample_id"], person_id=row["person_id"], age_group=row["age_group"], face_familiarity=row["face_familiarity"], body_reid_familiarity=row["body_reid_familiarity"], track_id=row["track_id"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], person_record_id=row["person_record_id"]) for row in rows]

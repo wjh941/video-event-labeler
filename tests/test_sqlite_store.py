@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import sqlite3
+import threading
 import time
 
 import pytest
@@ -56,6 +57,17 @@ def test_nested_transaction_does_not_commit_outer_transaction(store):
         assert connection.in_transaction
         assert connection.execute("SELECT COUNT(*) FROM datasets").fetchone()[0] == 2
     assert store.connection().execute("SELECT COUNT(*) FROM datasets").fetchone()[0] == 2
+
+
+def test_nested_transaction_rolls_back_only_inner_savepoint(store):
+    with store.transaction() as connection:
+        connection.execute("INSERT INTO datasets(dataset_id, root_path) VALUES ('outer', '.')")
+        with pytest.raises(RuntimeError):
+            with store.transaction() as nested:
+                nested.execute("INSERT INTO datasets(dataset_id, root_path) VALUES ('inner', '.')")
+                raise RuntimeError("abort inner")
+        assert connection.execute("SELECT COUNT(*) FROM datasets").fetchone()[0] == 1
+    assert store.connection().execute("SELECT COUNT(*) FROM datasets").fetchone()[0] == 1
 
 
 def test_sample_event_person_crud_round_trip(store):
@@ -138,3 +150,52 @@ def test_file_lock_releases_after_exception(tmp_path):
             raise ValueError("boom")
     with FileLock(lock_path, timeout_seconds=0.1):
         pass
+
+
+def test_file_lock_does_not_grow_on_repeated_acquisition(tmp_path):
+    lock_path = tmp_path / "dataset.lock"
+    with FileLock(lock_path):
+        pass
+    first_size = lock_path.stat().st_size
+    for _ in range(3):
+        with FileLock(lock_path):
+            pass
+    assert lock_path.stat().st_size == first_size == 1
+
+
+def test_store_initialization_uses_sibling_lock(tmp_path):
+    database_path = tmp_path / "dataset.db"
+    SQLiteStore(database_path)
+    assert database_path.with_name("dataset.db.lock").is_file()
+
+
+def test_reads_are_serialized_with_writes(store):
+    store.upsert_dataset("d1", ".")
+    store.upsert_sample(Sample(sample_id="s1", dataset_id="d1", relative_path="a.mp4"))
+    entered = threading.Event()
+    release = threading.Event()
+    read_done = threading.Event()
+
+    def writer() -> None:
+        with store.transaction() as connection:
+            entered.set()
+            release.wait(2)
+            connection.execute("UPDATE samples SET status = 'reviewed' WHERE sample_id = 's1'")
+
+    def reader() -> None:
+        store.get_sample("s1")
+        read_done.set()
+
+    writer_thread = threading.Thread(target=writer)
+    reader_thread = threading.Thread(target=reader)
+    writer_thread.start()
+    assert entered.wait(1)
+    reader_thread.start()
+    time.sleep(0.1)
+    assert not read_done.is_set()
+    release.set()
+    writer_thread.join(timeout=2)
+    reader_thread.join(timeout=2)
+    assert not writer_thread.is_alive()
+    assert not reader_thread.is_alive()
+    assert store.get_sample("s1").status == "reviewed"

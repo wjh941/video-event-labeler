@@ -21,13 +21,14 @@ class FileLock:
         self._locked = False
 
     def __enter__(self) -> "FileLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._handle = self.path.open("a+b")
-        if self._handle.tell() == 0:
-            self._handle.write(b"0")
-            self._handle.flush()
-        deadline = time.monotonic() + self.timeout_seconds
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._handle = self.path.open("a+b")
+            self._handle.seek(0, 2)
+            if self._handle.tell() == 0:
+                self._handle.write(b"0")
+                self._handle.flush()
+            deadline = time.monotonic() + self.timeout_seconds
             while True:
                 try:
                     self._acquire_once()
