@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 
 def _utc_now() -> str:
@@ -147,6 +147,13 @@ def _migration_v1(connection: sqlite3.Connection) -> None:
         connection.execute(statement_buffer.strip())
 
 
+def _migration_v2(connection: sqlite3.Connection) -> None:
+    """Store compatibility columns without changing the domain tables."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(samples)").fetchall()}
+    if "extra_json" not in columns:
+        connection.execute("ALTER TABLE samples ADD COLUMN extra_json TEXT NOT NULL DEFAULT '{}'")
+
+
 def _upgrade_schema_migrations_table(connection: sqlite3.Connection) -> None:
     """Rebuild a pre-v1 marker table so its timestamp policy is enforced."""
     definition = connection.execute(
@@ -183,10 +190,16 @@ def migrate_schema(connection: sqlite3.Connection, target_version: int = CURRENT
         if current < 1 <= target_version:
             _migration_v1(connection)
             connection.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (1, _utc_now()))
+            current = 1
         elif current >= 1 and target_version >= 1:
             # Re-run IF NOT EXISTS declarations to repair deleted tables/indexes even
             # when the migration marker is already present.
             _migration_v1(connection)
+        if current < 2 <= target_version:
+            _migration_v2(connection)
+            connection.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (2, _utc_now()))
+        elif current >= 2 and target_version >= 2:
+            _migration_v2(connection)
         if started_transaction:
             connection.commit()
     except Exception:

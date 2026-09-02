@@ -184,4 +184,24 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 python -m pytest -q
 ```
 
+## SQLite compatibility adapter
+
+SQLite is the internal source of truth. Import existing manifests and export
+compatibility CSV files with these commands:
+
+```powershell
+python -m video_labeler import-csv --csv video_labeler_manifest.csv --video-root D:\\videos --db dataset.db
+python -m video_labeler export-csv --db dataset.db --csv video_labeler_manifest.csv --video-root D:\\videos
+```
+
+The adapter accepts UTF-8/BOM CSV and common delimiters, stores unknown columns
+in `samples.extra_json`, derives `person_count` from `person_identity_attributes`,
+and computes deterministic sample/event/person identifiers. Legacy
+`person_tag_list` is discarded during import and never emitted on export. A
+changed or deleted source video is reported as `stale` while annotations remain
+untouched. Export writes a UTF-8 BOM CSV, a timestamped backup when needed, and
+`<csv>.meta.json` with schema version, UTC export time, database revision, and
+sample count. Malformed JSON in draft rows is retained as a draft with an import
+error.
+
 测试覆盖行为预标注、CSV 迁移、原子备份、并发修改检测、人物属性校验、多视频切换和事件字段保护。
