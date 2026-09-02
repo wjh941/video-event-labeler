@@ -24,7 +24,8 @@ REFERENCE_FIELDS = [
     "behavior_class",
     "behavior_id",
     "security_zone_points",
-    "person_tag_list",
+    "person_count",
+    "person_identity_attributes",
     "events",
 ]
 
@@ -211,7 +212,8 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(by_name[fall.name]["behavior_id"], "person_fall")
         self.assertEqual(by_name[fall.name]["behavior_class"], "跌倒")
         self.assertEqual(by_name[fall.name]["security_zone_points"], "null")
-        self.assertEqual(by_name[fall.name]["person_tag_list"], "")
+        self.assertEqual(by_name[fall.name]["person_count"], "0")
+        self.assertEqual(by_name[fall.name]["person_identity_attributes"], "[]")
         self.assertEqual(by_name[multi.name]["lighting"], "红外")
         self.assertEqual(
             by_name[multi.name]["behavior_id"],
@@ -279,7 +281,8 @@ class ImportTests(unittest.TestCase):
         refreshed, _ = labeler.read_csv_rows(manifest, "utf-8-sig")
 
         self.assertEqual(refreshed[0]["behavior_class"], "跌倒")
-        self.assertEqual(refreshed[0]["person_tag_list"], "stranger")
+        self.assertNotIn("person_tag_list", refreshed[0])
+        self.assertEqual(refreshed[0]["person_count"], "0")
         self.assertIn('"start_time_ms":1000ms', refreshed[0]["events"])
 
     def test_event_update_keeps_folder_behavior_class(self):
@@ -606,7 +609,7 @@ class ApiTests(unittest.TestCase):
         status, body = self.post_update(payload)
 
         self.assertEqual((status, body["ok"]), (200, True))
-        self.assertEqual(self.read_event_row()["person_tag_list"], "stranger")
+        self.assertNotIn("person_tag_list", self.read_event_row())
         self.assertEqual(labeler.read_csv_rows(self.manifest, "utf-8-sig")[1], REFERENCE_FIELDS)
         payload["review"] = True
         status, body = self.post_update(payload)
@@ -782,7 +785,17 @@ class ApiTests(unittest.TestCase):
         rows, fields = labeler.read_csv_rows(simple_path, "utf-8")
 
         self.assertEqual(status, 200)
-        self.assertEqual(fields, ["sample_id", "video_path", "start_time", "end_time"])
+        self.assertEqual(
+            fields,
+            [
+                "sample_id",
+                "video_path",
+                "start_time",
+                "end_time",
+                "person_count",
+                "person_identity_attributes",
+            ],
+        )
         self.assertEqual(rows[0]["end_time"], "0:00:08")
 
 
@@ -1132,7 +1145,6 @@ class HtmlContractTests(unittest.TestCase):
             'key==="p"',
             'key==="i"',
             'key==="o"',
-            '["1","2","3"].includes(key)',
             'event.target.closest(".event")',
             'event.target.matches("input,select,textarea")',
             "event.ctrlKey||event.metaKey||event.altKey",

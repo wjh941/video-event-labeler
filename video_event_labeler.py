@@ -84,7 +84,8 @@ MANIFEST_FIELDS = [
     "behavior_class",
     "behavior_id",
     "security_zone_points",
-    "person_tag_list",
+    "person_count",
+    "person_identity_attributes",
     "events",
 ]
 
@@ -275,6 +276,25 @@ def read_csv_rows(path: Path, encoding: str) -> tuple[list[dict[str, str]], list
         return list(reader), fieldnames
 
 
+def migrate_person_fields(rows: list[dict[str, str]], fieldnames: list[str]) -> bool:
+    """Migrate legacy person tags to the structured identity fields."""
+    changed = False
+    if "person_tag_list" in fieldnames:
+        fieldnames.remove("person_tag_list")
+        for row in rows:
+            row.pop("person_tag_list", None)
+        changed = True
+    for field, default in (("person_count", "0"), ("person_identity_attributes", "[]")):
+        if field not in fieldnames:
+            fieldnames.append(field)
+            changed = True
+        for row in rows:
+            if field not in row or not str(row.get(field) or "").strip():
+                row[field] = default
+                changed = True
+    return changed
+
+
 def _event_time_from_csv(value: str) -> int | None:
     value = value.strip().lower()
     if value == "null":
@@ -406,7 +426,8 @@ def make_import_row(root: Path, source: Path) -> dict[str, str]:
         "behavior_class": folder_behavior_class(root, source) or root.name,
         "behavior_id": ",".join(labels),
         "security_zone_points": "null",
-        "person_tag_list": "",
+        "person_count": "0",
+        "person_identity_attributes": "[]",
         "events": events_to_csv_value(events),
     }
 
@@ -496,11 +517,13 @@ def import_video_directory(
     if existing:
         encoding = detect_encoding(manifest)
         rows, fieldnames = read_csv_rows(manifest, encoding)
+        person_fields_changed = migrate_person_fields(rows, fieldnames)
         if detect_manifest_mode(fieldnames) != "events":
             raise ValueError("the import manifest must use the events schema")
     else:
         encoding = "utf-8-sig"
         rows, fieldnames = [], list(MANIFEST_FIELDS)
+        person_fields_changed = False
 
     sources = sorted(
         (
@@ -533,7 +556,7 @@ def import_video_directory(
             added_rows.append(make_import_row(root, source))
 
     _validate_row_identity(rows + added_rows, root)
-    if added_rows or classes_changed or not existing:
+    if added_rows or classes_changed or person_fields_changed or not existing:
         rows.extend(added_rows)
         write_csv_atomic(
             manifest,
@@ -543,9 +566,6 @@ def import_video_directory(
             backups if backups is not None else {},
         )
     return manifest, len(added_rows)
-
-
-PERSON_TAG_VALUES = {"stranger", "acquaintance", "null"}
 
 
 @dataclass
@@ -570,6 +590,7 @@ class AppState:
             raise ValueError(f"video directory does not exist: {video_root}")
         encoding = detect_encoding(csv_path)
         rows, fieldnames = read_csv_rows(csv_path, encoding)
+        migrate_person_fields(rows, fieldnames)
         detect_manifest_mode(fieldnames)
         _validate_row_identity(rows, video_root)
         state = cls(csv_path=csv_path, video_root=video_root, csv_encoding=encoding)
@@ -596,6 +617,7 @@ class AppState:
         current_signature = (signature.st_mtime_ns, signature.st_size)
         if self._rows_cache is None or self._file_signature != current_signature:
             rows, fieldnames = read_csv_rows(self.csv_path, self.csv_encoding)
+            migrate_person_fields(rows, fieldnames)
             detect_manifest_mode(fieldnames)
             _validate_row_identity(rows, self.video_root)
             self._set_snapshot_unlocked(rows, fieldnames)
@@ -611,6 +633,7 @@ class AppState:
         revision = _sha256_file(self.csv_path)
         if revision != self._revision_cache:
             rows, fieldnames = read_csv_rows(self.csv_path, self.csv_encoding)
+            migrate_person_fields(rows, fieldnames)
             detect_manifest_mode(fieldnames)
             _validate_row_identity(rows, self.video_root)
             self._set_snapshot_unlocked(rows, fieldnames)
@@ -672,12 +695,6 @@ def _split_behavior_ids(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[,，]", value or "") if part.strip()]
 
 
-def _validate_person_tag(value: object) -> str:
-    if value not in PERSON_TAG_VALUES:
-        raise ValueError("person_tag_list must be stranger, acquaintance, or null")
-    return str(value)
-
-
 class CsvConflictError(Exception):
     """Raised when a client tries to save against an older CSV revision."""
 
@@ -688,7 +705,6 @@ def _update_row(state: AppState, payload: dict[str, object]) -> dict[str, object
     sample_id = payload.get("sample_id")
     if not isinstance(sample_id, str) or not sample_id:
         raise ValueError("sample_id is required")
-    person_tag = _validate_person_tag(payload.get("person_tag_list"))
     review = payload.get("review", False)
     if not isinstance(review, bool):
         raise ValueError("review must be true or false")
@@ -743,8 +759,6 @@ def _update_row(state: AppState, payload: dict[str, object]) -> dict[str, object
             row["start_time"] = start.strip() or "null"
             row["end_time"] = end.strip() or "null"
 
-        if "person_tag_list" in fieldnames:
-            row["person_tag_list"] = person_tag
         if "review_status" in fieldnames:
             row["review_status"] = "reviewed" if review else "pending"
         backup = write_csv_atomic(state.csv_path, rows, fieldnames, state.csv_encoding, state.backups)
@@ -868,7 +882,6 @@ HTML = r"""<!doctype html>
     <section class="viewer"><div class="video-wrap"><video id="video" controls preload="metadata"></video></div><div id="meta" class="meta">导入视频文件夹后开始审核</div></section>
     <aside class="side">
       <div class="scroll">
-        <section class="section"><div class="section-title">人员标签</div><div id="person-tags" class="tag-group"><button class="tag" data-tag="stranger">陌生人</button><button class="tag" data-tag="acquaintance">熟人</button><button class="tag" data-tag="null">未判断</button></div></section>
         <section id="events-section" class="section"><div class="section-title">行为与时间段</div><div class="behavior-add"><select id="behavior-picker"><option value="person_fall">person_fall</option><option value="climb_fence">climb_fence</option><option value="peep_car_window">peep_car_window</option><option value="pickup_package">pickup_package</option><option value="linger_wander">linger_wander</option><option value="stay_long">stay_long</option><option value="cat_enter_frame">cat_enter_frame</option><option value="dog_enter_frame">dog_enter_frame</option><option value="car_enter_frame">car_enter_frame</option><option value="stranger_enter_frame">stranger_enter_frame</option><option value="approach_risk_zone">approach_risk_zone</option><option value="normal_scene">normal_scene</option></select><button id="add-event-segment">新建事件片段</button></div><div class="behavior-add"><input id="custom-behavior" maxlength="64" placeholder="自定义行为标签" aria-label="自定义行为标签"><button id="add-custom-event">添加自定义片段</button></div><div id="event-list" class="event-list"></div></section>
         <section class="section"><div class="actions"><button id="previous-row" class="icon" title="上一条" aria-label="上一条">&larr;</button><button id="next-row" class="icon" title="下一条" aria-label="下一条">&rarr;</button><button id="save-draft" class="primary">保存草稿</button><button id="review-next" class="review">审核并下一条</button></div></section>
       </div>
@@ -878,7 +891,7 @@ HTML = r"""<!doctype html>
 </div>
 <script>
 const $=id=>document.getElementById(id),video=$("video"),eventList=$("event-list");
-let rows=[],current=-1,mode=null,speed=1,dirty=false,selectedTag="null",csvRevision="";
+let rows=[],current=-1,mode=null,speed=1,dirty=false,csvRevision="";
 const CSV_CONFLICT_MESSAGE="CSV 已被外部修改，当前保存未覆盖；请刷新页面后重新确认";
 function setStatus(text,error=false){const box=$("status");box.textContent=text;box.className=error?"status error":"status"}
 function timeText(ms){if(ms===null||ms===undefined)return "";const total=Math.trunc(ms),hours=Math.floor(total/3600000),minutes=Math.floor(total%3600000/60000),seconds=Math.floor(total%60000/1000),milliseconds=total%1000;return `${hours}:${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}.${String(milliseconds).padStart(3,"0")}`}
@@ -887,7 +900,6 @@ async function request(url,options){const response=await fetch(url,options);let 
 function eventState(row){if(mode==="simple"){return row.start_time&&row.start_time!=="null"&&row.end_time&&row.end_time!=="null"?"ready":"needs-time"}const events=row.events||[];if(events.length===0)return "needs-time";if(events.length===1&&events[0].event_type==="normal_scene")return "ready";return events.every(item=>item.start_time_ms!==null&&item.end_time_ms!==null)?"ready":"needs-time"}
 function isVisible(row){const filter=$("filter").value;if(filter==="all")return true;if(filter==="needs-time")return eventState(row)==="needs-time";return (row.review_status||"pending")===filter}
 function renderList(){const list=$("list");list.replaceChildren();const visible=rows.map((row,index)=>({row,index})).filter(item=>isVisible(item.row));if(!visible.length){const empty=document.createElement("div");empty.className="empty";empty.textContent=rows.length?"当前筛选没有匹配的视频":"尚未导入视频";list.append(empty);return}for(const{row,index}of visible){const item=document.createElement("button");item.className="item"+(index===current?" active":"");item.type="button";const number=document.createElement("span");number.className="number";number.textContent=index+1;const name=document.createElement("span");name.className="sample";name.textContent=row.sample_id;name.title=row.sample_id;const badge=document.createElement("span");badge.className="badge "+(row.review_status==="reviewed"?"reviewed":eventState(row)==="needs-time"?"needs-time":"");badge.textContent=row.review_status==="reviewed"?"已审核":eventState(row)==="needs-time"?"需补时间":"待审核";item.append(number,name,badge);item.onclick=()=>openRow(index);list.append(item)}}
-function setTag(value){selectedTag=["stranger","acquaintance","null"].includes(value)?value:"null";document.querySelectorAll(".tag").forEach(button=>button.classList.toggle("selected",button.dataset.tag===selectedTag))}
 function changeDirty(){dirty=true}
 function makeButton(text,className=""){const button=document.createElement("button");button.type="button";button.textContent=text;if(className)button.className=className;return button}
 function makeTimeRow(label,value,capture){const row=document.createElement("div");row.className="time-row";const labelEl=document.createElement("label");labelEl.textContent=label;const input=document.createElement("input");input.value=timeText(value);input.placeholder="0:00:00.000";input.inputMode="decimal";input.addEventListener("input",changeDirty);const captureButton=makeButton("截取","capture");captureButton.onclick=()=>{input.value=timeText(Math.floor(video.currentTime*1000));changeDirty()};const clear=makeButton("清空","capture");clear.onclick=()=>{input.value="";changeDirty()};row.append(labelEl,input,captureButton,clear);return{row,input}}
@@ -896,9 +908,9 @@ function renderSimple(row){eventList.replaceChildren();const card=document.creat
 function parseTimeSafe(text){try{return parseTime(text||"")}catch{return null}}
 function renderEvents(row){eventList.replaceChildren();if(mode==="simple"){renderSimple(row);return}for(const event of row.events||[])renderEventCard(event)}
 function currentEvents(){return[...eventList.querySelectorAll(".event")].map(card=>({event_type:card.dataset.eventType,start_time_ms:parseTime(card.querySelectorAll("input")[0].value),end_time_ms:parseTime(card.querySelectorAll("input")[1].value)}))}
-function buildPayload(review){if(current<0)throw new Error("没有可保存的视频");const row=rows[current];if(mode==="simple"){const inputs=eventList.querySelectorAll("input");return{sample_id:row.sample_id,person_tag_list:selectedTag,start_time:inputs[0].value.trim()||"null",end_time:inputs[1].value.trim()||"null",review}}return{sample_id:row.sample_id,person_tag_list:selectedTag,events:currentEvents(),review}}
-async function save(review=false){if(current<0)return false;let payload;try{payload=buildPayload(review)}catch(error){setStatus(error.message,true);return false}setStatus(review?"正在审核...":"正在保存...");try{const result=await request("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});rows[current].person_tag_list=selectedTag;rows[current].review_status=result.review_status;if(mode==="simple"){rows[current].start_time=payload.start_time;rows[current].end_time=payload.end_time}else{rows[current].events=payload.events;rows[current].behavior_id=payload.events.map(event=>event.event_type).join(",")}dirty=false;renderList();setStatus(result.review_status==="reviewed"?"已审核":"草稿已保存");return true}catch(error){setStatus(error.message||"保存失败",true);return false}}
-async function openRow(index){if(index<0||index>=rows.length)return;if(current!==index&&dirty&&!(await save(false)))return;current=index;const row=rows[index];video.src=row.video_url;video.playbackRate=speed;$("meta").replaceChildren();const strong=document.createElement("strong");strong.textContent=row.sample_id;$("meta").append(strong,document.createTextNode(`  |  ${row.behavior_id||"未选择行为"}  |  ${row.data_stratum||""}`));setTag(row.person_tag_list);renderEvents(row);dirty=false;renderList();setStatus(row.review_status==="reviewed"?"该视频已审核":"待审核")}
+function buildPayload(review){if(current<0)throw new Error("没有可保存的视频");const row=rows[current];if(mode==="simple"){const inputs=eventList.querySelectorAll("input");return{sample_id:row.sample_id,start_time:inputs[0].value.trim()||"null",end_time:inputs[1].value.trim()||"null",review}}return{sample_id:row.sample_id,events:currentEvents(),review}}
+async function save(review=false){if(current<0)return false;let payload;try{payload=buildPayload(review)}catch(error){setStatus(error.message,true);return false}setStatus(review?"正在审核...":"正在保存...");try{const result=await request("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});rows[current].review_status=result.review_status;if(mode==="simple"){rows[current].start_time=payload.start_time;rows[current].end_time=payload.end_time}else{rows[current].events=payload.events;rows[current].behavior_id=payload.events.map(event=>event.event_type).join(",")}dirty=false;renderList();setStatus(result.review_status==="reviewed"?"已审核":"草稿已保存");return true}catch(error){setStatus(error.message||"保存失败",true);return false}}
+async function openRow(index){if(index<0||index>=rows.length)return;if(current!==index&&dirty&&!(await save(false)))return;current=index;const row=rows[index];video.src=row.video_url;video.playbackRate=speed;$("meta").replaceChildren();const strong=document.createElement("strong");strong.textContent=row.sample_id;$("meta").append(strong,document.createTextNode(`  |  ${row.behavior_id||"未选择行为"}  |  ${row.data_stratum||""}`));renderEvents(row);dirty=false;renderList();setStatus(row.review_status==="reviewed"?"该视频已审核":"待审核")}
 function addBehavior(){if(mode!=="events"||current<0)return;const value=$("behavior-picker").value;const existing=[...eventList.querySelectorAll(".event")].map(card=>card.dataset.eventType);if(existing.includes(value)){setStatus("该行为已存在",true);return}if(value==="normal_scene"&&existing.length&&!confirm("添加 normal_scene 会清除其他未保存行为，是否继续？"))return;if(value!=="normal_scene"&&existing.includes("normal_scene")&&!confirm("添加正例会清除 normal_scene，是否继续？"))return;if(value==="normal_scene")eventList.replaceChildren();if(value!=="normal_scene"&&existing.includes("normal_scene"))eventList.replaceChildren();renderEventCard({event_type:value,start_time_ms:null,end_time_ms:null});changeDirty()}
 async function load(){try{const status=await request("/api/status");mode=status.mode;$("dataset").textContent=status.ready?`${status.video_root_name} / ${status.csv_name}`:"未选择视频目录";$("events-section").style.display=status.ready?"block":"none";rows=await request("/api/videos");renderList();if(rows.length)await openRow(0);else setStatus(status.ready?"没有发现可播放视频":"请选择一个视频文件夹")}catch(error){setStatus(error.message,true)}}
 async function importVideoRoot(){
@@ -923,15 +935,15 @@ async function importWithFolderPicker(){
   finally{button.disabled=false}
 }
 $("import-folder").onclick=importWithFolderPicker;
-$("add-event-segment").onclick=()=>addBehavior();$("save-draft").onclick=()=>save(false);$("review-next").onclick=async()=>{if(await save(true)){const next=rows.findIndex((row,index)=>index>current&&isVisible(row));if(next>=0)await openRow(next)}};$("filter").onchange=renderList;document.querySelectorAll(".tag").forEach(button=>button.onclick=()=>{setTag(button.dataset.tag);changeDirty()});document.querySelectorAll(".speed button").forEach(button=>button.onclick=()=>{document.querySelectorAll(".speed button").forEach(item=>item.classList.remove("active"));button.classList.add("active");speed=Number(button.dataset.speed);video.playbackRate=speed});document.addEventListener("keydown",event=>{if(event.target.tagName==="INPUT"||event.target.tagName==="SELECT")return;if(event.key==="ArrowLeft")moveVisibleRow(-1);if(event.key==="ArrowRight")moveVisibleRow(1);if(event.key===" "){event.preventDefault();video.paused?video.play():video.pause()}});load();
+$("add-event-segment").onclick=()=>addBehavior();$("save-draft").onclick=()=>save(false);$("review-next").onclick=async()=>{if(await save(true)){const next=rows.findIndex((row,index)=>index>current&&isVisible(row));if(next>=0)await openRow(next)}};$("filter").onchange=renderList;document.querySelectorAll(".speed button").forEach(button=>button.onclick=()=>{document.querySelectorAll(".speed button").forEach(item=>item.classList.remove("active"));button.classList.add("active");speed=Number(button.dataset.speed);video.playbackRate=speed});document.addEventListener("keydown",event=>{if(event.target.tagName==="INPUT"||event.target.tagName==="SELECT")return;if(event.key==="ArrowLeft")moveVisibleRow(-1);if(event.key==="ArrowRight")moveVisibleRow(1);if(event.key===" "){event.preventDefault();video.paused?video.play():video.pause()}});load();
 </script>
 <script>
 function eventState(row){if(mode==="simple"){const start=parseTimeSafe(row.start_time),end=parseTimeSafe(row.end_time);return start!==null&&end!==null&&end>start?"ready":"needs-time"}const events=row.events||[];if(events.length===0)return "needs-time";if(events.length===1&&events[0].event_type==="normal_scene")return "ready";return events.every(item=>item.start_time_ms!==null&&item.end_time_ms!==null&&item.end_time_ms>item.start_time_ms)?"ready":"needs-time"}
 function isVisible(row){const filter=$("filter").value;return filter==="all"||eventState(row)===filter}
 function renderList(){const list=$("list");list.replaceChildren();const visible=rows.map((row,index)=>({row,index})).filter(item=>isVisible(item.row));if(!visible.length){const empty=document.createElement("div");empty.className="empty";empty.textContent=rows.length?"当前筛选没有匹配的视频":"尚未导入视频";list.append(empty);return}for(const{row,index}of visible){const item=document.createElement("button");item.className="item"+(index===current?" active":"");item.type="button";const number=document.createElement("span");number.className="number";number.textContent=index+1;const name=document.createElement("span");name.className="sample";name.textContent=row.sample_id;name.title=row.sample_id;const state=eventState(row);const badge=document.createElement("span");badge.className="badge "+(state==="needs-time"?"needs-time":"reviewed");badge.textContent=state==="needs-time"?"需补时间":"可审核";item.append(number,name,badge);item.onclick=()=>openRow(index);list.append(item)}}
-function buildPayload(review){if(current<0)throw new Error("没有可保存的视频");const row=rows[current];if(mode==="simple"){const inputs=eventList.querySelectorAll("input");return{sample_id:row.sample_id,video_path:row.video_path,person_tag_list:selectedTag,start_time:inputs[0].value.trim()||"null",end_time:inputs[1].value.trim()||"null",review}}return{sample_id:row.sample_id,video_path:row.video_path,person_tag_list:selectedTag,events:currentEvents(),review}}
-async function save(review=false){if(current<0)return false;let payload;try{payload=buildPayload(review)}catch(error){setStatus(error.message,true);return false}setStatus(review?"正在审核...":"正在保存...");try{const result=await request("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});rows[current].person_tag_list=selectedTag;if(mode==="simple"){rows[current].start_time=payload.start_time;rows[current].end_time=payload.end_time}else{rows[current].events=payload.events;rows[current].behavior_id=payload.events.map(event=>event.event_type).join(",");rows[current].behavior_class=result.behavior_class||rows[current].behavior_class}dirty=false;renderList();setStatus(review?"已审核":"草稿已保存");return true}catch(error){setStatus(error.message||"保存失败",true);return false}}
-async function openRow(index){if(index<0||index>=rows.length)return;if(current!==index&&dirty&&!(await save(false)))return;current=index;const row=rows[index];video.src=row.video_url;video.playbackRate=speed;$("meta").replaceChildren();const strong=document.createElement("strong");strong.textContent=row.sample_id;const details=[row.behavior_class||row.behavior_id||"未选择行为",row.lighting||""].filter(Boolean);$("meta").append(strong,document.createTextNode(`  |  ${details.join("  |  ")}`));setTag(row.person_tag_list);renderEvents(row);dirty=false;renderList();setStatus(eventState(row)==="needs-time"?"需补时间":"可审核")}
+function buildPayload(review){if(current<0)throw new Error("没有可保存的视频");const row=rows[current];if(mode==="simple"){const inputs=eventList.querySelectorAll("input");return{sample_id:row.sample_id,video_path:row.video_path,start_time:inputs[0].value.trim()||"null",end_time:inputs[1].value.trim()||"null",review}}return{sample_id:row.sample_id,video_path:row.video_path,events:currentEvents(),review}}
+async function save(review=false){if(current<0)return false;let payload;try{payload=buildPayload(review)}catch(error){setStatus(error.message,true);return false}setStatus(review?"正在审核...":"正在保存...");try{const result=await request("/api/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});if(mode==="simple"){rows[current].start_time=payload.start_time;rows[current].end_time=payload.end_time}else{rows[current].events=payload.events;rows[current].behavior_id=payload.events.map(event=>event.event_type).join(",");rows[current].behavior_class=result.behavior_class||rows[current].behavior_class}dirty=false;renderList();setStatus(review?"已审核":"草稿已保存");return true}catch(error){setStatus(error.message||"保存失败",true);return false}}
+async function openRow(index){if(index<0||index>=rows.length)return;if(current!==index&&dirty&&!(await save(false)))return;current=index;const row=rows[index];video.src=row.video_url;video.playbackRate=speed;$("meta").replaceChildren();const strong=document.createElement("strong");strong.textContent=row.sample_id;const details=[row.behavior_class||row.behavior_id||"未选择行为",row.lighting||""].filter(Boolean);$("meta").append(strong,document.createTextNode(`  |  ${details.join("  |  ")}`));renderEvents(row);dirty=false;renderList();setStatus(eventState(row)==="needs-time"?"需补时间":"可审核")}
 $("filter").innerHTML='<option value="all">全部视频</option><option value="needs-time">需补时间</option><option value="ready">可审核</option>';$("filter").onchange=renderList;
 </script>
 <script>
@@ -953,7 +965,7 @@ function visibleRows(){return rows.map((row,index)=>({row,index})).filter(item=>
 function renderProgress(visible){const position=visible.findIndex(item=>item.index===current)+1;const ready=visible.filter(item=>eventState(item.row)==="ready").length;const needsTime=visible.length-ready;$("progress").textContent=`第 ${Math.max(position,0)} / ${visible.length} 条 | 可审核 ${ready} | 需补时间 ${needsTime}`;$("previous-row").disabled=position<=1;$("next-row").disabled=position<1||position>=visible.length}
 function renderList(){const list=$("list");list.replaceChildren();const visible=visibleRows();renderProgress(visible);if(!visible.length){const empty=document.createElement("div");empty.className="empty";empty.textContent=rows.length?"当前筛选没有匹配的视频":"尚未导入视频";list.append(empty);return}for(const{row,index}of visible){const item=document.createElement("button");item.className="item"+(index===current?" active":"");item.type="button";const number=document.createElement("span");number.className="number";number.textContent=index+1;const name=document.createElement("span");name.className="sample";name.textContent=row.sample_id;name.title=row.sample_id;const state=eventState(row);const badge=document.createElement("span");badge.className="badge "+(state==="needs-time"?"needs-time":"reviewed");badge.textContent=state==="needs-time"?"需补时间":"可审核";item.append(number,name,badge);item.onclick=()=>openRow(index);list.append(item)}}
 async function moveVisibleRow(delta){const visible=visibleRows();const position=visible.findIndex(item=>item.index===current);const target=visible[position+delta];if(target)await openRow(target.index)}
-async function openRow(index){if(index<0||index>=rows.length)return;if(current!==index&&dirty&&!(await save(false)))return;stopLoop();current=index;const row=rows[index];video.src=row.video_url;video.playbackRate=speed;$("meta").replaceChildren();const strong=document.createElement("strong");strong.textContent=row.sample_id;const details=[row.behavior_class||row.behavior_id||"未选择行为",row.lighting||""].filter(Boolean);$("meta").append(strong,document.createTextNode(`  |  ${details.join("  |  ")}`));setTag(row.person_tag_list);renderEvents(row);dirty=false;renderList();setStatus(eventState(row)==="needs-time"?"需补时间":"可审核")}
+async function openRow(index){if(index<0||index>=rows.length)return;if(current!==index&&dirty&&!(await save(false)))return;stopLoop();current=index;const row=rows[index];video.src=row.video_url;video.playbackRate=speed;$("meta").replaceChildren();const strong=document.createElement("strong");strong.textContent=row.sample_id;const details=[row.behavior_class||row.behavior_id||"未选择行为",row.lighting||""].filter(Boolean);$("meta").append(strong,document.createTextNode(`  |  ${details.join("  |  ")}`));renderEvents(row);dirty=false;renderList();setStatus(eventState(row)==="needs-time"?"需补时间":"可审核")}
 video.addEventListener("timeupdate",()=>{if(loopRange&&video.currentTime>=loopRange.end){video.currentTime=loopRange.start;video.play().catch(()=>{})}});
 video.addEventListener("ended",()=>{if(loopRange){video.currentTime=loopRange.start;video.play().catch(()=>{})}});
 $("add-event-segment").onclick=addEventSegment;$("add-custom-event").onclick=addCustomEventSegment;$("custom-behavior").addEventListener("keydown",event=>{if(event.key==="Enter"){event.preventDefault();addCustomEventSegment()}});$("previous-row").onclick=()=>moveVisibleRow(-1);$("next-row").onclick=()=>moveVisibleRow(1);$("review-next").onclick=async()=>{if(await save(true))await moveVisibleRow(1)};
@@ -989,17 +1001,13 @@ document.addEventListener("keydown",async event=>{
   if(event.ctrlKey||event.metaKey||event.altKey)return;
   if(event.target.matches("input,select,textarea")||event.target.isContentEditable)return;
   const key=event.key.toLowerCase();
-  if(["s","r","n","p","i","o","1","2","3"].includes(key))event.preventDefault();
+  if(["s","r","n","p","i","o"].includes(key))event.preventDefault();
   if(key==="s"){await save(false);return}
   if(key==="r"){if(await save(true))await moveVisibleRow(1);return}
   if(key==="n"){await moveNeedsTime(1);return}
   if(key==="p"){await moveNeedsTime(-1);return}
   if(key==="i"){captureShortcutTime("start");return}
   if(key==="o"){captureShortcutTime("end");return}
-  if(["1","2","3"].includes(key)){
-    const tags={"1":"stranger","2":"acquaintance","3":"null"};
-    setTag(tags[key]);changeDirty();setStatus("人员标签已更新");
-  }
 });
 </script>
 <script>
@@ -1179,7 +1187,6 @@ class Handler(BaseHTTPRequestHandler):
             if mode == "events":
                 behavior_ids = _split_behavior_ids(row.get("behavior_id", ""))
                 item["events"] = parse_events(row.get("events", ""), behavior_ids)
-            item["person_tag_list"] = row.get("person_tag_list") or "null"
             if not is_reference_manifest(fieldnames):
                 item["review_status"] = row.get("review_status") or "pending"
             item["video_url"] = "/video/" + row.get("video_path", "").replace("\\", "/")

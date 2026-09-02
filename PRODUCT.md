@@ -31,6 +31,8 @@ The application runs from `D:\default file\视频标注工具` on a Windows work
 - Imports video folders recursively and incrementally maintains `video_labeler_manifest.csv`.
 - Supports the requested fixed behavior taxonomy plus retained legacy CSV labels.
 - Prelabels `neg` videos as `normal_scene`; maps `dog_out` to `dog_enter_frame`.
+- Produces structured `person_count` and `person_identity_attributes` fields for the companion person annotator.
+- The companion annotator switches the original video per CSV row, previews event ranges, and writes only person fields.
 - Requires a human review action before a row becomes reviewed.
 - Supports legacy simple `start_time`/`end_time` CSVs and multi-event `events` CSVs.
 - Creates a timestamped backup before the first in-process modification of an existing CSV and writes atomically.

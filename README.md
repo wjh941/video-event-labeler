@@ -1,42 +1,187 @@
-# 视频事件标注工具
+# Video Event Labeler
 
-`behavior_class` 取导入根目录下的第一级文件夹名称。例如导入 `D:\dapeng-test` 时，`D:\dapeng-test\跌倒\pos\clip.mp4` 的类别为 `跌倒`。再次导入会刷新已发现视频的类别，但保留人工事件、时间和人员标签。
+本仓库提供一套本地视频标注工具：先从视频目录生成行为事件 CSV，再使用同一份 CSV 标注人物身份属性。工具只使用 Python 标准库，不需要安装第三方 Python 包。
 
-选择固定行为标签后，点击“新建事件片段”可新增独立的行为片段；也可在下方输入自定义行为标签并点击“添加自定义片段”。每个片段卡片顶部都可重新选择标签，方便创建后修正；同一标签可以对应多个独立的时间片段。自定义标签会写入当前视频的现有事件列，重新打开 CSV 后仍可查看和编辑，但不会加入固定下拉列表。每段的时间可精确录入或通过“截取”写入毫秒时间，填写有效起止时间后可点击“循环片段”反复检查该区间。右侧同时提供上一条、下一条和当前筛选进度，所有操作控件均位于侧栏，不遮挡视频播放区域。
+## 环境
 
-无需安装第三方库。使用 Python 3 在本机启动后，浏览器打开 `http://127.0.0.1:8765`。
+- Windows
+- Python 3.10 或更高版本
+- 一个按目录组织的视频数据集
+
+进入仓库目录：
 
 ```powershell
 cd 'D:\default file\视频标注工具'
-python .\video_event_labeler.py
-python .\video_event_labeler.py --video-root 'D:\dapeng-test'
-python .\video_event_labeler.py --video-root 'D:\videos' --csv 'D:\videos\existing.csv'
 ```
 
-If the native folder picker is unavailable, paste the local directory path into the `video-root-path` field in the web page and click `import-path`. The equivalent command-line fallback is:
+## 推荐：组合启动
+
+一次完成两个阶段：
 
 ```powershell
-python .\video_event_labeler.py --video-root "D:\videos"
+python .\run_video_annotation.py --video-root 'D:\videos'
 ```
 
-不带参数启动后，点击“导入视频文件夹”选择目录。工具会递归扫描常见视频格式，并在该目录创建或增量更新 `video_labeler_manifest.csv`。已有标注不会因再次导入而覆盖。
+启动器会：
 
-新生成的清单使用 UTF-8 with BOM 编码，并严格采用以下九列及顺序，兼容 `0818_cam03_clips_sample_sorted_by_start_event_labeler_manifest.csv`：
+1. 扫描视频目录，创建或增量更新 `video_labeler_manifest.csv`。
+2. 打开行为事件标注页面。
+3. 行为阶段完成后，在终端按 `Ctrl+C` 停止第一阶段。
+4. 自动启动人物身份标注页面。
+5. 人物阶段完成后，在终端按 `Ctrl+C` 结束。
+
+如果行为事件已经标完，只进入人物阶段：
+
+```powershell
+python .\run_video_annotation.py --video-root 'D:\videos' --person-only
+```
+
+组合启动器默认使用 8765 端口标注行为、8865 端口标注人物；端口被占用时可调整：
+
+```powershell
+python .\run_video_annotation.py --video-root 'D:\videos' --event-port 9000 --person-port 9001
+```
+
+## 分开启动
+
+### 1. 生成清单并标注行为
+
+```powershell
+python .\video_event_labeler.py --video-root 'D:\videos'
+```
+
+也可以指定已有 CSV：
+
+```powershell
+python .\video_event_labeler.py `
+  --video-root 'D:\videos' `
+  --csv 'D:\videos\my_manifest.csv'
+```
+
+不带命令行参数时，页面支持选择视频文件夹或输入目录路径。工具会递归扫描常见格式：`.mp4`、`.avi`、`.mov`、`.mkv`、`.webm`、`.m4v`。
+
+### 2. 标注人物身份
+
+```powershell
+python .\person_identity_labeler.py `
+  --video-root 'D:\videos' `
+  --csv 'D:\videos\video_labeler_manifest.csv'
+```
+
+人物脚本会根据 CSV 每一行的 `video_path` 自动切换原视频。点击事件卡片的“播放片段”时，会从该事件的开始时间播放到结束时间并自动暂停，不会生成新视频。
+
+人物脚本只保存人物字段，行为类型、事件时间、灯光和其他字段由行为标注脚本维护。事件卡片在人物页面中用于回看检查，属于只读内容。
+
+## 推荐目录结构
 
 ```text
-sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,security_zone_points,person_tag_list,events
+D:\videos\
+├─ 跌倒\
+│  └─ pos\
+│     └─ fall-pos-001.mp4
+├─ 入侵\
+│  └─ neg\
+│     └─ normal-neg-001.mp4
+└─ video_labeler_manifest.csv
 ```
 
-其中 `sample_id` 是包含扩展名的视频文件名，`video_path` 为绝对 Windows 路径，`lighting_evidence` 为 `人工确认`，`security_zone_points` 为字面量 `null`。`events` 保持旧多行为工具的多行 `ms` 事件格式，时间精确到毫秒。新清单不会写入 `data_stratum` 或 `review_status`。
+目录名和文件名中的行为关键词会用于预填行为标签。`pos` 表示正例，`neg` 表示负例；负例会预填 `normal_scene`。预填结果只是草稿，必须人工确认后才能审核。
 
-支持的行为标签：
+## CSV 字段
 
-`person_fall`、`climb_fence`、`peep_car_window`、`pickup_package`、`linger_wander`、`stay_long`、`cat_enter_frame`、`dog_enter_frame`、`car_enter_frame`、`stranger_enter_frame`、`approach_risk_zone`、`normal_scene`。
+新清单使用 UTF-8 with BOM 编码，字段顺序为：
 
-`pos` 路径中的视频会按目录和文件名预填正例标签；`neg` 路径会预填 `normal_scene`。标签本身及别名均可识别，`dog_out` 会预填为 `dog_enter_frame`，文件名包含标准名 `car_enter_frame` 会预填该标签。多行为按照标签在路径或文件名中的出现顺序预选，人工仍可增删和调整时间。
+```text
+sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,security_zone_points,person_count,person_identity_attributes,events
+```
 
-自定义标签支持中文或英文，去除首尾空格后最多 64 个字符，不能含逗号或换行。它们不会从文件名自动识别；需要时在当前视频的“自定义行为标签”输入框重新填写即可。
+| 字段 | 用途 |
+| --- | --- |
+| `sample_id` | 视频文件名，作为稳定记录 ID |
+| `video_path` | 原视频绝对路径；人物页面按此路径切换视频 |
+| `lighting` | 从目录名推断的白天、黑夜或红外 |
+| `lighting_evidence` | 默认 `人工确认` |
+| `behavior_class` | 目录推断的行为类别 |
+| `behavior_id` | 一个或多个行为标签，逗号分隔 |
+| `security_zone_points` | 兼容旧格式，默认 `null` |
+| `person_count` | 非负整数，允许为 `0` |
+| `person_identity_attributes` | JSON 人员数组 |
+| `events` | 行为事件及毫秒级起止时间 |
 
-“保存草稿”可保存未完整的时间段；“审核并下一条”要求正例的每个行为都有合法的开始、结束时间，且结束必须晚于开始；`normal_scene` 不需要时间段。界面根据事件时间显示“需补时间”或“可审核”，审核状态不写入新清单。
+## 人员属性格式
 
-首次改写已有 CSV 前，工具会在 CSV 同级的 `event_labeler_backups` 文件夹创建带时间戳的备份，并通过临时文件原子替换写入。工具兼容已有的多行为 `events` CSV，以及单个 `start_time` / `end_time` CSV；旧版文件会保留自身列结构。
+`person_identity_attributes` 只保存结构化 JSON，不再生成或维护旧的 `person_tag_list` 字段。
+
+```json
+[
+  {
+    "person_id": "p1",
+    "age_group": "adult",
+    "face_familiarity": "stranger",
+    "body_reid_familiarity": "unknown"
+  }
+]
+```
+
+可选值：
+
+- `age_group`: `child`、`adult`、`elderly`、`unknown`
+- `face_familiarity`: `familiar`、`stranger`、`unknown`、`not_visible`
+- `body_reid_familiarity`: `familiar`、`stranger`、`unknown`、`not_visible`
+
+每行人员编号必须唯一。人员数为 0 时保存为空数组 `[]`。人脸或体态无法判断时使用 `unknown` 或 `not_visible`，不要编造身份。
+
+## 行为标注流程
+
+1. 选择左侧记录。
+2. 在视频播放器中定位事件开始位置，点击事件卡片的“截取”。
+3. 定位结束位置，再点击“截取”。
+4. 点击“循环片段”反复检查区间。
+5. 点击“保存草稿”或“审核并下一条”。
+
+正例事件审核时必须填写合法的开始和结束时间，且结束时间晚于开始时间。`normal_scene` 可以没有时间段，不能和正例行为混用。
+
+## 人物标注流程
+
+1. 选择当前 CSV 记录，确认页面已经切换到对应原视频。
+2. 填写人员数量；`0` 表示画面中没有需要标注的人员。
+3. 为每个人填写唯一编号、年龄段、人脸熟悉度和体态熟悉度。
+4. 使用事件卡片的“播放片段”检查行为区间与人物属性是否匹配。
+5. 保存当前记录，或保存后切换上一条/下一条。
+
+人物页面不会改写事件字段；如果需要调整行为或时间，请回到 `video_event_labeler.py`。
+
+## 安全写入与恢复
+
+- 写入前会在 CSV 同目录创建 `.bak` 或 `event_labeler_backups` 时间戳备份。
+- 使用临时文件和原子替换，避免半写入 CSV。
+- 行为脚本检测 CSV 是否被外部修改；冲突时不会覆盖外部修改。
+- 从旧 CSV 迁移时会补齐 `person_count`、`person_identity_attributes`，并移除旧的 `person_tag_list`。
+
+恢复方式：关闭标注服务，把备份文件复制回原 CSV 文件名，然后重新启动脚本。
+
+## 常见问题
+
+### 浏览器打不开
+
+查看终端打印的本地地址，例如 `http://127.0.0.1:8765/`，手动复制到浏览器。也可以使用 `--no-browser` 后手动访问。
+
+### 视频不存在
+
+确认 CSV 的 `video_path` 指向真实文件；相对路径需要配合 `--video-root` 使用。
+
+### 保存提示 CSV 被外部修改
+
+关闭其他正在编辑该 CSV 的程序，刷新页面，重新确认当前记录后再保存。
+
+### 需要重新扫描目录
+
+再次运行 `video_event_labeler.py --video-root ...`。已存在记录的人工事件和人物属性会保留，新视频会增量加入。
+
+## 测试
+
+```powershell
+python -m pytest -q
+```
+
+测试覆盖行为预标注、CSV 迁移、原子备份、并发修改检测、人物属性校验、多视频切换和事件字段保护。
