@@ -50,3 +50,18 @@ python -m pytest -q tests/test_domain.py tests/test_schema.py
 python -m py_compile video_labeler/domain.py video_labeler/schema.py
 exit code 0
 ```
+
+## Review 修复 Round 2
+
+- `schema_migrations.applied_at` 增加 UTC `strftime` 默认值与 `Z` 后缀约束。
+- v1 DDL 执行改用 `sqlite3.complete_statement` 增量识别完整 SQL 语句，避免按分号切分导致未来字符串或 trigger 语句被错误拆分。
+
+复核后验证：
+
+```text
+python -m pytest -q tests/test_domain.py tests/test_schema.py
+15 passed in 0.10s
+
+python -m py_compile video_labeler/domain.py video_labeler/schema.py
+exit code 0
+```

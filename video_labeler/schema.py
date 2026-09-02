@@ -135,9 +135,16 @@ def _migration_v1(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_revisions_sample_id ON annotation_revisions(sample_id);
         """
     )
-    for statement in (part.strip() for part in schema_script.split(";")):
-        if statement:
-            connection.execute(statement)
+    # sqlite3.complete_statement understands quoted semicolons and trigger bodies,
+    # so future migrations can safely add those without changing this runner.
+    statement_buffer = ""
+    for character in schema_script:
+        statement_buffer += character
+        if character == ";" and sqlite3.complete_statement(statement_buffer):
+            connection.execute(statement_buffer.strip())
+            statement_buffer = ""
+    if statement_buffer.strip():
+        connection.execute(statement_buffer.strip())
 
 
 def migrate_schema(connection: sqlite3.Connection, target_version: int = CURRENT_SCHEMA_VERSION) -> None:
@@ -148,7 +155,7 @@ def migrate_schema(connection: sqlite3.Connection, target_version: int = CURRENT
     try:
         if started_transaction:
             connection.execute("BEGIN")
-        connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) CHECK(applied_at LIKE '%Z'))")
         current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
         if current > target_version:
             raise ValueError(f"database schema {current} is newer than target {target_version}")

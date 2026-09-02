@@ -82,3 +82,12 @@ def test_timestamp_columns_reject_non_utc_values():
     initialize_schema(connection)
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute("INSERT INTO datasets(dataset_id, root_path, created_at, updated_at) VALUES ('d1', '.', '2026-01-01 00:00:00', '2026-01-01 00:00:00')")
+
+
+def test_schema_migration_timestamp_defaults_to_utc_and_rejects_local_time():
+    connection = sqlite3.connect(":memory:")
+    initialize_schema(connection)
+    applied_at = connection.execute("SELECT applied_at FROM schema_migrations").fetchone()[0]
+    assert applied_at.endswith("Z")
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (99, '2026-01-01 00:00:00')")
