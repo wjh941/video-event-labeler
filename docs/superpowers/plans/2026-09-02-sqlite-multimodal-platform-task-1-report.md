@@ -19,6 +19,12 @@ python -m py_compile video_labeler/domain.py video_labeler/schema.py
 exit code 0
 ```
 
+## Commits
+
+- `8e765ce feat: add typed multimodal domain and schema migrations`
+- `b403301 fix: harden schema migration atomicity and constraints`
+- `976fa10 fix: harden migration statement execution and timestamps`
+
 ## 设计检查
 
 - 年龄段严格为 `child`、`adult`、`elderly`、`unknown`。
