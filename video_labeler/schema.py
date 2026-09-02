@@ -13,14 +13,16 @@ def _utc_now() -> str:
 
 
 def _migration_v1(connection: sqlite3.Connection) -> None:
-    connection.executescript(
+    # The statements are deliberately executed one at a time.  sqlite3.executescript
+    # issues an implicit COMMIT, which would make a failed migration leave partial DDL.
+    schema_script = (
         """
         CREATE TABLE IF NOT EXISTS datasets (
             dataset_id TEXT PRIMARY KEY,
             root_path TEXT NOT NULL,
             schema_version INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) CHECK(created_at LIKE '%Z'),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) CHECK(updated_at LIKE '%Z')
         );
         CREATE TABLE IF NOT EXISTS samples (
             sample_id TEXT PRIMARY KEY,
@@ -30,8 +32,8 @@ def _migration_v1(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','reviewed','rejected')),
             schema_version INTEGER NOT NULL DEFAULT 1,
             revision INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL CHECK(created_at LIKE '%Z'),
+            updated_at TEXT NOT NULL CHECK(updated_at LIKE '%Z'),
             FOREIGN KEY(dataset_id) REFERENCES datasets(dataset_id) ON DELETE SET NULL
         );
         CREATE TABLE IF NOT EXISTS media_assets (
@@ -63,7 +65,8 @@ def _migration_v1(connection: sqlite3.Connection) -> None:
             FOREIGN KEY(sample_id) REFERENCES samples(sample_id) ON DELETE CASCADE,
             CHECK(start_time_ms IS NULL OR start_time_ms >= 0),
             CHECK(end_time_ms IS NULL OR end_time_ms >= 0),
-            CHECK(start_time_ms IS NULL OR end_time_ms IS NULL OR end_time_ms >= start_time_ms)
+            CHECK(start_time_ms IS NULL OR end_time_ms IS NULL OR end_time_ms >= start_time_ms),
+            CHECK(review_status = 'draft' OR (start_time_ms IS NOT NULL AND end_time_ms IS NOT NULL))
         );
         CREATE TABLE IF NOT EXISTS persons (
             person_record_id TEXT PRIMARY KEY,
@@ -104,7 +107,7 @@ def _migration_v1(connection: sqlite3.Connection) -> None:
             model_name TEXT NOT NULL,
             model_version TEXT NOT NULL,
             confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
-            created_at TEXT NOT NULL,
+            created_at TEXT NOT NULL CHECK(created_at LIKE '%Z'),
             FOREIGN KEY(sample_id) REFERENCES samples(sample_id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS annotation_revisions (
@@ -116,7 +119,7 @@ def _migration_v1(connection: sqlite3.Connection) -> None:
             before_json TEXT,
             after_json TEXT,
             app_version TEXT,
-            created_at TEXT NOT NULL,
+            created_at TEXT NOT NULL CHECK(created_at LIKE '%Z'),
             FOREIGN KEY(sample_id) REFERENCES samples(sample_id) ON DELETE CASCADE,
             UNIQUE(sample_id, revision)
         );
@@ -132,25 +135,36 @@ def _migration_v1(connection: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_revisions_sample_id ON annotation_revisions(sample_id);
         """
     )
+    for statement in (part.strip() for part in schema_script.split(";")):
+        if statement:
+            connection.execute(statement)
 
 
 def migrate_schema(connection: sqlite3.Connection, target_version: int = CURRENT_SCHEMA_VERSION) -> None:
     if target_version < 0 or target_version > CURRENT_SCHEMA_VERSION:
         raise ValueError(f"unsupported schema version: {target_version}")
     connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-    current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
-    if current > target_version:
-        raise ValueError(f"database schema {current} is newer than target {target_version}")
-    if current < 1 <= target_version:
-        try:
+    started_transaction = not connection.in_transaction
+    try:
+        if started_transaction:
             connection.execute("BEGIN")
+        connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
+        if current > target_version:
+            raise ValueError(f"database schema {current} is newer than target {target_version}")
+        if current < 1 <= target_version:
             _migration_v1(connection)
             connection.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (1, _utc_now()))
+        elif current >= 1 and target_version >= 1:
+            # Re-run IF NOT EXISTS declarations to repair deleted tables/indexes even
+            # when the migration marker is already present.
+            _migration_v1(connection)
+        if started_transaction:
             connection.commit()
-        except Exception:
+    except Exception:
+        if started_transaction:
             connection.rollback()
-            raise
+        raise
 
 
 def initialize_schema(connection: sqlite3.Connection) -> None:

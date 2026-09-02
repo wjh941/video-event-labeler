@@ -31,3 +31,22 @@ exit code 0
 
 - `video_labeler.storage.sqlite_store.SQLiteStore` 尚由 Task 2 实现；fixture 已按 brief 要求惰性导入，因此本任务测试可独立运行。
 - 当前 schema 版本为 1；后续结构变更应新增迁移函数并递增 `CURRENT_SCHEMA_VERSION`，不要修改已应用迁移的语义。
+
+## Review 修复
+
+根据 Task 1 review 追加以下修复：
+
+- events 表增加约束：非 draft 记录必须同时具有起止时间。
+- 将 schema DDL 从 `executescript` 改为逐条 `execute`，并把 marker 创建、DDL 和版本记录放在同一事务中；失败会完整回滚，随后可以重试。
+- 已应用版本会重新执行 `IF NOT EXISTS` 声明，能够修复 marker 存在但表或索引被删除的数据库。
+- datasets、samples、model_predictions、annotation_revisions 的时间列统一增加 UTC `Z` 后缀约束；datasets 默认值由 SQLite UTC `strftime` 生成。
+
+修复后验证：
+
+```text
+python -m pytest -q tests/test_domain.py tests/test_schema.py
+14 passed in 0.08s
+
+python -m py_compile video_labeler/domain.py video_labeler/schema.py
+exit code 0
+```

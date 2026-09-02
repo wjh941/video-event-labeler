@@ -47,3 +47,38 @@ def test_dataset_minimal_insert_uses_utc_timestamp_defaults():
     created, updated = connection.execute("SELECT created_at, updated_at FROM datasets").fetchone()
     assert created.endswith("Z")
     assert updated.endswith("Z")
+
+
+def test_non_draft_event_requires_complete_time_range():
+    connection = sqlite3.connect(":memory:")
+    initialize_schema(connection)
+    connection.execute("INSERT INTO samples(sample_id, relative_path, created_at, updated_at) VALUES ('s1', 'a.mp4', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')")
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute("INSERT INTO events(event_id, sample_id, event_type, source, review_status) VALUES ('e1', 's1', 'fall', 'human', 'accepted')")
+
+
+def test_failed_migration_rolls_back_marker_and_can_retry():
+    connection = sqlite3.connect(":memory:")
+    connection.set_authorizer(lambda action, arg1, *_: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_CREATE_TABLE and arg1 == "events" else sqlite3.SQLITE_OK)
+    with pytest.raises(sqlite3.DatabaseError):
+        initialize_schema(connection)
+    assert connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone() is None
+    connection.set_authorizer(None)
+    initialize_schema(connection)
+    assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+
+
+def test_initialize_repairs_missing_index_when_marker_exists():
+    connection = sqlite3.connect(":memory:")
+    initialize_schema(connection)
+    connection.execute("DROP INDEX idx_events_status")
+    assert not any("idx_events_status" == row[1] for row in connection.execute("PRAGMA index_list('events')"))
+    initialize_schema(connection)
+    assert any("idx_events_status" == row[1] for row in connection.execute("PRAGMA index_list('events')"))
+
+
+def test_timestamp_columns_reject_non_utc_values():
+    connection = sqlite3.connect(":memory:")
+    initialize_schema(connection)
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute("INSERT INTO datasets(dataset_id, root_path, created_at, updated_at) VALUES ('d1', '.', '2026-01-01 00:00:00', '2026-01-01 00:00:00')")
