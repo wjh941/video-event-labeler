@@ -91,3 +91,13 @@ def test_schema_migration_timestamp_defaults_to_utc_and_rejects_local_time():
     assert applied_at.endswith("Z")
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (99, '2026-01-01 00:00:00')")
+
+
+def test_existing_schema_migrations_table_is_upgraded_without_losing_rows():
+    connection = sqlite3.connect(":memory:")
+    connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (1, '2026-01-01T00:00:00Z')")
+    migrate_schema(connection)
+    assert connection.execute("SELECT version, applied_at FROM schema_migrations").fetchall() == [(1, '2026-01-01T00:00:00Z')]
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (2, '2026-01-01 00:00:00')")

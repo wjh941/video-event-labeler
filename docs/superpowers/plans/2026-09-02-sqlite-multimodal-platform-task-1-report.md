@@ -19,6 +19,21 @@ python -m py_compile video_labeler/domain.py video_labeler/schema.py
 exit code 0
 ```
 
+## Review 修复 Round 3
+
+- 对已存在但没有 UTC 定义的旧版 `schema_migrations` 表执行显式兼容迁移：在当前事务中重建新定义、保留版本记录，并为缺少 `Z` 后缀的历史时间补齐 UTC 标记。
+- 增加旧表升级回归测试，验证记录保留以及升级后非法时间写入被拒绝。
+
+复核后验证：
+
+```text
+python -m pytest -q tests/test_domain.py tests/test_schema.py
+16 passed in 0.10s
+
+python -m py_compile video_labeler/domain.py video_labeler/schema.py
+exit code 0
+```
+
 ## Commits
 
 - `8e765ce feat: add typed multimodal domain and schema migrations`

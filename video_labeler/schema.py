@@ -147,6 +147,26 @@ def _migration_v1(connection: sqlite3.Connection) -> None:
         connection.execute(statement_buffer.strip())
 
 
+def _upgrade_schema_migrations_table(connection: sqlite3.Connection) -> None:
+    """Rebuild a pre-v1 marker table so its timestamp policy is enforced."""
+    definition = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ).fetchone()
+    if not definition:
+        return
+    sql = definition[0].upper()
+    if "CHECK(APPLIED_AT LIKE '%Z')" in sql and "DEFAULT (STRFTIME" in sql:
+        return
+    connection.execute("ALTER TABLE schema_migrations RENAME TO schema_migrations_legacy")
+    connection.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) CHECK(applied_at LIKE '%Z'))"
+    )
+    connection.execute(
+        "INSERT INTO schema_migrations(version, applied_at) SELECT version, CASE WHEN applied_at LIKE '%Z' THEN applied_at ELSE applied_at || 'Z' END FROM schema_migrations_legacy"
+    )
+    connection.execute("DROP TABLE schema_migrations_legacy")
+
+
 def migrate_schema(connection: sqlite3.Connection, target_version: int = CURRENT_SCHEMA_VERSION) -> None:
     if target_version < 0 or target_version > CURRENT_SCHEMA_VERSION:
         raise ValueError(f"unsupported schema version: {target_version}")
@@ -156,6 +176,7 @@ def migrate_schema(connection: sqlite3.Connection, target_version: int = CURRENT
         if started_transaction:
             connection.execute("BEGIN")
         connection.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) CHECK(applied_at LIKE '%Z'))")
+        _upgrade_schema_migrations_table(connection)
         current = connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
         if current > target_version:
             raise ValueError(f"database schema {current} is newer than target {target_version}")
