@@ -5,6 +5,7 @@ from pathlib import Path
 
 from video_labeler.domain import MediaAsset, Sample
 from video_labeler.media import (
+    UnsafeMediaPath,
     is_safe_media_path,
     iter_video_files,
     probe_media,
@@ -55,6 +56,45 @@ def test_probe_parses_ffprobe_json(tmp_path):
     assert metadata.width == 640
     assert metadata.height == 360
     assert metadata.audio_present is True
+
+
+def test_probe_rejects_semantically_malformed_payloads(tmp_path):
+    media = tmp_path / "sample.mp4"
+    media.write_bytes(b"x")
+    cases = [
+        {"format": {"duration": "nan"}, "streams": []},
+        {"format": {"duration": "1"}, "streams": [{"codec_type": "audio"}]},
+        {"format": {"duration": "1"}, "streams": [{"codec_type": "video", "width": -1, "height": 360}]},
+        {"format": {"duration": "inf"}, "streams": [{"codec_type": "video", "width": 640, "height": 360}]},
+        {"format": {"duration": "1"}, "streams": [{"codec_type": "video", "width": 640, "height": 360, "r_frame_rate": "nan/1"}]},
+    ]
+    for index, payload in enumerate(cases):
+        ffprobe = tmp_path / f"ffprobe-{index}.py"
+        ffprobe.write_text("@echo " + json.dumps(payload) + "\n", encoding="utf-8")
+        assert probe_media(media, ffprobe_path=ffprobe) == probe_media(media, ffprobe_path=tmp_path / "missing")
+
+
+def test_safe_resolved_path_is_used_for_hash_and_probe(tmp_path):
+    root = tmp_path / "videos"
+    root.mkdir()
+    target = root / "sample.mp4"
+    target.write_bytes(b"inside")
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"outside")
+    link = root / "link.mp4"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        return
+    assert sha256_file(link, root=root) == sha256_file(target)
+    link.unlink()
+    link.symlink_to(outside)
+    try:
+        sha256_file(link, root=root)
+    except UnsafeMediaPath:
+        pass
+    else:
+        raise AssertionError("symlink escaping media root was read")
 
 
 def test_media_asset_crud(store):
