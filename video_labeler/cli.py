@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .maintenance import backup_database, check_database
 from .quality import dataset_stats, export_jsonl, validate_dataset
 from .storage.csv_adapter import export_csv, import_csv
 from .storage.sqlite_store import SQLiteStore
@@ -19,6 +20,8 @@ def build_parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate"); validate.add_argument("--db", required=True, type=Path); validate.add_argument("--mode", choices=("draft", "strict"), default="draft")
     stats = commands.add_parser("stats"); stats.add_argument("--db", required=True, type=Path)
     export = commands.add_parser("export"); export.add_argument("--db", required=True, type=Path); export.add_argument("--format", choices=("jsonl",), required=True); export.add_argument("--output", "--path", "--csv", dest="output", required=True, type=Path); export.add_argument("--manifest", type=Path); export.add_argument("--split-seed", default="video-labeler-v1")
+    backup = commands.add_parser("backup-db"); backup.add_argument("--db", required=True, type=Path); backup.add_argument("--output", required=True, type=Path)
+    commands.add_parser("check-db").add_argument("--db", required=True, type=Path)
     return parser
 
 
@@ -41,6 +44,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "stats":
             print(json.dumps(dataset_stats(store), ensure_ascii=False, sort_keys=True))
             return 0
+        if args.command == "backup-db":
+            output = backup_database(store, args.output)
+            print(json.dumps({"path": str(output)}, ensure_ascii=False))
+            return 0
+        if args.command == "check-db":
+            report = check_database(store)
+            print(json.dumps({"ok": report.ok, "integrity_check": report.integrity_check, "schema_version": report.schema_version}, ensure_ascii=False))
+            return 0 if report.ok else 1
         jsonl_report = export_jsonl(store, args.output, manifest_path=args.manifest, split_seed=args.split_seed)
         print(json.dumps({"path": str(jsonl_report.path), "sample_count": jsonl_report.sample_count}, ensure_ascii=False))
         return 0

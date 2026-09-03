@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+import shutil
 import threading
 import uuid
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -42,8 +44,13 @@ class SQLiteStore:
         self._connection = sqlite3.connect(str(self.path), timeout=5.0, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._savepoint_counter = 0
-        self._configure_connection()
-        with FileLock(self.path.with_name(self.path.name + ".lock")):
+        lock_path = self.path.with_name(self.path.name + ".lock")
+        with FileLock(lock_path):
+            if self.path.exists() and self.path.stat().st_size > 0:
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                backup = self.path.with_name(f"{self.path.name}.pre-migration-{timestamp}.db")
+                shutil.copy2(self.path, backup)
+            self._configure_connection()
             migrate_schema(self._connection)
 
     def _configure_connection(self) -> None:
