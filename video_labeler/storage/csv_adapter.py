@@ -53,6 +53,7 @@ class ExportReport:
     sample_count: int
     backup_path: Path | None
     meta_path: Path
+    manifest_path: Path | None = None
 
 
 def _normalise_relative_path(value: str, video_root: Path) -> str:

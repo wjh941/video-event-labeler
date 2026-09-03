@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 from collections import Counter
@@ -14,6 +15,7 @@ from .domain import utc_now
 from .storage.csv_adapter import ExportReport
 from .storage.file_lock import FileLock
 from .storage.sqlite_store import SQLiteStore
+from .schema import CURRENT_SCHEMA_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +49,7 @@ def _issue(sample_id: str | None, field: str, code: str, message: str) -> Qualit
     return QualityIssue(sample_id=sample_id, field=field, code=code, message=message)
 
 
-def validate_dataset(store: SQLiteStore) -> QualityReport:
+def validate_dataset(store: SQLiteStore, mode: str = "draft") -> QualityReport:
     """Validate cross-table consistency and media/annotation completeness.
 
     Database constraints catch malformed enum values at write time.  This pass
@@ -55,28 +57,36 @@ def validate_dataset(store: SQLiteStore) -> QualityReport:
     Missing optional media/probe metadata is reported as a warning so a CSV-only
     dataset can still be exported and reviewed.
     """
+    if mode not in ("draft", "strict"):
+        raise ValueError("mode must be 'draft' or 'strict'")
     errors: list[QualityIssue] = []
     warnings: list[QualityIssue] = []
+
+    def completeness(issue: QualityIssue) -> None:
+        (errors if mode == "strict" else warnings).append(issue)
+
     samples = store.list_samples(limit=10**9, offset=0)
     for sample in samples:
         sid = sample.sample_id
         if not sample.relative_path.strip():
             errors.append(_issue(sid, "relative_path", "missing_relative_path", "sample has no media path"))
         if not sample.source_sha256:
-            warnings.append(_issue(sid, "source_sha256", "missing_source_hash", "source hash is not recorded"))
+            completeness(_issue(sid, "source_sha256", "missing_source_hash", "source hash is not recorded"))
 
         assets = store.get_media_assets(sid)
         video_assets = [asset for asset in assets if asset.modality == "video"]
-        if not assets:
-            warnings.append(_issue(sid, "media_assets", "missing_media", "no indexed media assets"))
+        if not video_assets:
+            completeness(_issue(sid, "media_assets", "missing_media", "no indexed media assets"))
         for asset in assets:
             if asset.probe_status != "ok":
-                warnings.append(_issue(sid, f"media.{asset.modality}", "media_probe_unavailable", f"probe status is {asset.probe_status!r}"))
+                completeness(_issue(sid, f"media.{asset.modality}", "media_probe_unavailable", f"probe status is {asset.probe_status!r}"))
             if sample.source_sha256 and asset.source_sha256 and sample.source_sha256 != asset.source_sha256:
-                warnings.append(_issue(sid, "source_sha256", "stale_source_hash", "media hash differs from sample hash"))
+                completeness(_issue(sid, "source_sha256", "stale_source_hash", "media hash differs from sample hash"))
 
         duration_ms = next((asset.duration_ms for asset in video_assets if asset.duration_ms is not None), None)
-        for event in store.get_events(sid):
+        events = store.get_events(sid)
+        complete_events: list[tuple[int, int, str]] = []
+        for event in events:
             if event.start_time_ms is None or event.end_time_ms is None:
                 if event.review_status != "draft":
                     errors.append(_issue(sid, "events", "missing_event_time", f"event {event.event_id} is not draft but has no complete time range"))
@@ -85,12 +95,20 @@ def validate_dataset(store: SQLiteStore) -> QualityReport:
                 errors.append(_issue(sid, "events", "event_non_positive_duration", f"event {event.event_id} has non-positive duration"))
             if duration_ms is not None and event.end_time_ms > duration_ms:
                 errors.append(_issue(sid, "events", "event_out_of_bounds", f"event {event.event_id} ends at {event.end_time_ms}ms, media is {duration_ms}ms"))
+            complete_events.append((event.start_time_ms, event.end_time_ms, event.event_id))
+        for index, (start, end, event_id) in enumerate(sorted(complete_events)):
+            if index and start < sorted(complete_events)[index - 1][1]:
+                errors.append(_issue(sid, "events", "event_overlap", f"event {event_id} overlaps another event"))
 
         people = store.get_persons(sid)
         ids = [person.person_id for person in people]
         for person_id, count in Counter(ids).items():
             if count > 1:
                 errors.append(_issue(sid, "persons.person_id", "duplicate_person_id", f"person_id {person_id!r} occurs {count} times"))
+        if mode == "strict" and sample.status == "reviewed":
+            for child in (*events, *people):
+                if child.review_status == "draft":
+                    errors.append(_issue(sid, "review_status", "draft_annotation_in_reviewed_sample", "reviewed sample contains draft annotations"))
         for prediction in store.list_predictions(sid):
             record = store.prediction_record(prediction.prediction_id)
             if record is not None and record[1] not in ("draft", "accepted", "rejected"):
@@ -214,10 +232,24 @@ def _atomic_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
             os.unlink(temporary)
 
 
-def export_jsonl(store: SQLiteStore, path: Path) -> ExportReport:
+def _split_for(sample_id: str, seed: str) -> str:
+    bucket = int(hashlib.sha256(f"{seed}\0{sample_id}".encode("utf-8")).hexdigest()[:8], 16) % 100
+    return "train" if bucket < 80 else "validation" if bucket < 90 else "test"
+
+
+def export_jsonl(store: SQLiteStore, path: Path, manifest_path: Path | None = None,
+                 split_seed: str = "video-labeler-v1") -> ExportReport:
     """Export one deterministic multimodal/provenance record per sample."""
     path = Path(path)
-    records = [_json_record(store, sample) for sample in store.list_samples(limit=10**9, offset=0)]
+    samples = store.list_samples(limit=10**9, offset=0)
+    records = []
+    split_ids: dict[str, list[str]] = {"train": [], "validation": [], "test": []}
+    for sample in samples:
+        record = _json_record(store, sample)
+        split = _split_for(sample.sample_id, split_seed)
+        record["split"] = split
+        records.append(record)
+        split_ids[split].append(sample.sample_id)
     backup_path: Path | None = None
     meta_path = path.with_name(path.name + ".meta.json")
     with FileLock(path.with_name(path.name + ".lock")):
@@ -235,7 +267,36 @@ def export_jsonl(store: SQLiteStore, path: Path) -> ExportReport:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-    return ExportReport(path=path, sample_count=len(records), backup_path=backup_path, meta_path=meta_path)
+        if manifest_path is not None:
+            manifest_path = Path(manifest_path)
+            manifest = {
+                "schema_version": CURRENT_SCHEMA_VERSION,
+                "generated_at": utc_now(),
+                "max_revision": max((sample.revision for sample in samples), default=0),
+                "database_revision": max((sample.revision for sample in samples), default=0),
+                "sample_count": len(samples),
+                "source_hashes": {sample.sample_id: sample.source_sha256 for sample in samples},
+                "split_seed": split_seed,
+                "splits": split_ids,
+                "counts": {
+                    "sample_count": len(samples),
+                    "splits": {name: len(ids) for name, ids in split_ids.items()},
+                    "events": sum(len(store.get_events(sample.sample_id)) for sample in samples),
+                    "persons": sum(len(store.get_persons(sample.sample_id)) for sample in samples),
+                },
+            }
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=f".{manifest_path.name}.", suffix=".tmp", dir=str(manifest_path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                    json.dump(manifest, handle, ensure_ascii=False, sort_keys=True, indent=2)
+                    handle.write("\n")
+                    handle.flush(); os.fsync(handle.fileno())
+                os.replace(temporary, manifest_path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+    return ExportReport(path=path, sample_count=len(records), backup_path=backup_path, meta_path=meta_path, manifest_path=manifest_path)
 
 
 __all__ = ["QualityIssue", "QualityReport", "dataset_stats", "export_jsonl", "validate_dataset"]

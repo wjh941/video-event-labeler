@@ -29,3 +29,24 @@ def test_jsonl_export_is_deterministic_and_atomic(store, tmp_path):
     export_jsonl(store, output)
     assert output.read_bytes() == first
     assert any(path.name.startswith("train.before_export") for path in tmp_path.iterdir())
+
+
+def test_jsonl_export_assigns_deterministic_splits_and_writes_manifest(store, tmp_path):
+    for sample_id in ("s1", "s2", "s3"):
+        store.upsert_sample(Sample(sample_id=sample_id, relative_path=f"{sample_id}.mp4", source_sha256=f"hash-{sample_id}"))
+    output = tmp_path / "dataset.jsonl"
+    manifest = tmp_path / "dataset.manifest.json"
+
+    export_jsonl(store, output, manifest_path=manifest, split_seed="test-seed")
+    first_records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    first_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+    export_jsonl(store, output, manifest_path=manifest, split_seed="test-seed")
+    second_records = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+    assert [(r["sample"]["sample_id"], r["split"]) for r in first_records] == [(r["sample"]["sample_id"], r["split"]) for r in second_records]
+    assert first_manifest["schema_version"] >= 1
+    assert first_manifest["split_seed"] == "test-seed"
+    assert first_manifest["source_hashes"] == {"s1": "hash-s1", "s2": "hash-s2", "s3": "hash-s3"}
+    assert first_manifest["max_revision"] >= 0
+    assert first_manifest["counts"]["sample_count"] == 3
+    assert sum(first_manifest["counts"]["splits"].values()) == 3
