@@ -1395,6 +1395,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-root", type=Path, help="要导入或读取的视频根目录")
     parser.add_argument("--csv", type=Path, help="已有或要生成的 manifest CSV")
     parser.add_argument("--port", type=int, default=8765, help="本地网页端口，默认 8765")
+    parser.add_argument("--db", type=Path, help="SQLite database path")
     return parser
 
 

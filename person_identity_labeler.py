@@ -1481,6 +1481,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="本地服务地址，默认 127.0.0.1")
     parser.add_argument("--port", type=int, default=8765, help="起始端口，默认 8765")
     parser.add_argument("--no-browser", action="store_true", help="只启动服务，不自动打开浏览器")
+    parser.add_argument("--db", help="SQLite database path")
     return parser.parse_args()
 
 

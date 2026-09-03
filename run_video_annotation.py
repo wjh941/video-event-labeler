@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     parser.add_argument("--event-port", type=int, default=8765, help="行为标注起始端口")
     parser.add_argument("--person-port", type=int, default=8865, help="人物标注起始端口")
+    parser.add_argument("--db", type=Path, help="SQLite database path")
     return parser
 
 
@@ -55,7 +56,8 @@ def main() -> int:
         print(f"生成 CSV 失败: {error}", file=sys.stderr)
         return 2
 
-    common = ["--video-root", str(root), "--csv", str(csv_path)]
+    db_path = (args.db or root / "dataset.db").expanduser().resolve()
+    common = ["--video-root", str(root), "--csv", str(csv_path), "--db", str(db_path)]
     if args.no_browser:
         common.append("--no-browser")
 
