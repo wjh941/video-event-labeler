@@ -1,5 +1,7 @@
 # Product
 
+The current platform uses SQLite schema version 3 as its internal source of truth, with CSV and JSONL as explicit export formats. See `docs/architecture.md` for data lineage and security boundaries.
+
 <!-- impeccable:product-schema 1 -->
 
 ## Platform

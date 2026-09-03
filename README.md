@@ -1,5 +1,9 @@
 # Video Event Labeler
 
+SQLite platform commands, schema details, and a reproducible synthetic demo are documented in `docs/architecture.md`, `docs/data-model.md`, and `docs/demo_dataset/README.md`. The current database schema is version 3.
+
+Validation: `python -m video_labeler validate --db dataset.db`.
+
 本仓库提供一套本地视频标注工具：先从视频目录生成行为事件 CSV，再使用同一份 CSV 标注人物身份属性。工具只使用 Python 标准库，不需要安装第三方 Python 包。
 
 ## 环境
