@@ -116,24 +116,28 @@ class AnnotationService:
         return SaveResult(sample_id, revision)
 
     def restore_revision(self, sample_id: str, revision: int, actor: str, expected_revision: int | None = None) -> SaveResult:
-        row = self.store.get_revision(sample_id, revision)
-        if row is None:
-            raise KeyError(f"unknown revision {sample_id}:{revision}")
-        events_json, people_json = snapshot_payload(row["after_json"] or "")
-        events = [self._event(value, sample_id) for value in events_json]
-        people = [self._person(value, sample_id) for value in people_json]
-        # Single-collection saves record a complete snapshot for auditability,
-        # but restoring them should not roll back the collection they did not
-        # edit. Restore-generated revisions intentionally restore both sides.
-        summary = str(row["summary"] or "")
-        if summary == "save events":
-            people = self.store.get_persons(sample_id)
-        elif summary == "save people":
-            events = self.store.get_events(sample_id)
-        new_revision = self.store.replace_annotations(sample_id, events=events, people=people,
-                                                       expected_revision=expected_revision, actor=actor,
-                                                       summary=f"restore revision {revision}")
-        return SaveResult(sample_id, new_revision)
+        # Keep the historical snapshot and the untouched collection from one
+        # consistent read while replace_annotations runs in a nested savepoint.
+        with self.store.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM annotation_revisions WHERE sample_id = ? AND revision = ?",
+                (sample_id, revision),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown revision {sample_id}:{revision}")
+            events_json, people_json = snapshot_payload(row["after_json"] or "")
+            events = [self._event(value, sample_id) for value in events_json]
+            people = [self._person(value, sample_id) for value in people_json]
+            # Single-collection saves preserve the untouched side by design.
+            summary = str(row["summary"] or "")
+            if summary == "save events":
+                people = self.store._persons_from_connection(connection, sample_id)
+            elif summary == "save people":
+                events = self.store._events_from_connection(connection, sample_id)
+            new_revision = self.store.replace_annotations(sample_id, events=events, people=people,
+                                                           expected_revision=expected_revision, actor=actor,
+                                                           summary=f"restore revision {revision}")
+            return SaveResult(sample_id, new_revision)
 
     def export_csv(self, path: Path):
         return export_csv(self.store, Path(path), self.video_root)
