@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping
 
 from .domain import Event, Person, Prediction
 from .providers import AnnotationProvider
+from .serialization import snapshot_payload
 from .storage.csv_adapter import export_csv
 from .storage.sqlite_store import SQLiteStore
 
@@ -104,15 +105,35 @@ class AnnotationService:
             raise KeyError(sample_id)
         return self._row(sample)
 
-    def save_events(self, sample_id: str, events: Iterable[Event | Mapping[str, Any]], expected_revision: int | None = None) -> SaveResult:
+    def save_events(self, sample_id: str, events: Iterable[Event | Mapping[str, Any]], expected_revision: int | None = None, actor: str = "human") -> SaveResult:
         converted = [self._event(e, sample_id) for e in events]
-        revision = self.store.replace_events(sample_id, converted, expected_revision)
+        revision = self.store.replace_annotations(sample_id, events=converted, expected_revision=expected_revision, actor=actor, summary="save events")
         return SaveResult(sample_id, revision, "reviewed" if any(e.review_status == "accepted" for e in converted) else "draft")
 
-    def save_people(self, sample_id: str, people: Iterable[Person | Mapping[str, Any]], expected_revision: int | None = None) -> SaveResult:
+    def save_people(self, sample_id: str, people: Iterable[Person | Mapping[str, Any]], expected_revision: int | None = None, actor: str = "human") -> SaveResult:
         converted = [self._person(p, sample_id) for p in people]
-        revision = self.store.replace_persons(sample_id, converted, expected_revision)
+        revision = self.store.replace_annotations(sample_id, people=converted, expected_revision=expected_revision, actor=actor, summary="save people")
         return SaveResult(sample_id, revision)
+
+    def restore_revision(self, sample_id: str, revision: int, actor: str, expected_revision: int | None = None) -> SaveResult:
+        row = self.store.get_revision(sample_id, revision)
+        if row is None:
+            raise KeyError(f"unknown revision {sample_id}:{revision}")
+        events_json, people_json = snapshot_payload(row["after_json"] or "")
+        events = [self._event(value, sample_id) for value in events_json]
+        people = [self._person(value, sample_id) for value in people_json]
+        # Single-collection saves record a complete snapshot for auditability,
+        # but restoring them should not roll back the collection they did not
+        # edit. Restore-generated revisions intentionally restore both sides.
+        summary = str(row["summary"] or "")
+        if summary == "save events":
+            people = self.store.get_persons(sample_id)
+        elif summary == "save people":
+            events = self.store.get_events(sample_id)
+        new_revision = self.store.replace_annotations(sample_id, events=events, people=people,
+                                                       expected_revision=expected_revision, actor=actor,
+                                                       summary=f"restore revision {revision}")
+        return SaveResult(sample_id, new_revision)
 
     def export_csv(self, path: Path):
         return export_csv(self.store, Path(path), self.video_root)

@@ -6,11 +6,13 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterator, Sequence
 
 from ..domain import Event, Evidence, MediaAsset, Person, Prediction, Sample
 from ..schema import migrate_schema
+from ..serialization import canonical_snapshot
 from .file_lock import FileLock
 
 
@@ -235,6 +237,64 @@ class SQLiteStore:
         except sqlite3.IntegrityError as exc:
             raise StorageError(f"event replacement failed: {exc}") from exc
 
+    @staticmethod
+    def _events_from_connection(connection: sqlite3.Connection, sample_id: str) -> list[Event]:
+        rows = connection.execute("SELECT * FROM events WHERE sample_id = ? ORDER BY event_id", (sample_id,)).fetchall()
+        return [Event(sample_id=row["sample_id"], event_type=row["event_type"], start_time_ms=row["start_time_ms"], end_time_ms=row["end_time_ms"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], event_id=row["event_id"]) for row in rows]
+
+    @staticmethod
+    def _persons_from_connection(connection: sqlite3.Connection, sample_id: str) -> list[Person]:
+        rows = connection.execute("SELECT * FROM persons WHERE sample_id = ? ORDER BY person_id", (sample_id,)).fetchall()
+        return [Person(sample_id=row["sample_id"], person_id=row["person_id"], age_group=row["age_group"], face_familiarity=row["face_familiarity"], body_reid_familiarity=row["body_reid_familiarity"], track_id=row["track_id"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], person_record_id=row["person_record_id"]) for row in rows]
+
+    def replace_annotations(self, sample_id: str, events: Sequence[Event] | None = None,
+                             people: Sequence[Person] | None = None,
+                             expected_revision: int | None = None, actor: str = "human",
+                             summary: str = "") -> int:
+        """Replace one or both child collections and append an audit revision atomically."""
+        if events is not None and any(event.sample_id != sample_id for event in events):
+            raise ValueError("all events must belong to sample_id")
+        if people is not None and any(person.sample_id != sample_id for person in people):
+            raise ValueError("all persons must belong to sample_id")
+        try:
+            with self.transaction() as connection:
+                current = self._check_revision(connection, sample_id, expected_revision)
+                before_events = self._events_from_connection(connection, sample_id)
+                before_people = self._persons_from_connection(connection, sample_id)
+                new_events = list(before_events if events is None else events)
+                new_people = list(before_people if people is None else people)
+                # Generate child IDs once, before serializing, so the audit
+                # snapshot exactly describes the rows written below.
+                new_events = [
+                    event if event.event_id else replace(event, event_id=_event_id(event, index))
+                    for index, event in enumerate(new_events)
+                ]
+                new_people = [
+                    person if person.person_record_id else replace(person, person_record_id=_person_record_id(person, index))
+                    for index, person in enumerate(new_people)
+                ]
+                before_json = canonical_snapshot(before_events, before_people)
+                after_json = canonical_snapshot(new_events, new_people)
+                connection.execute("DELETE FROM events WHERE sample_id = ?", (sample_id,))
+                connection.executemany("""INSERT INTO events(event_id, sample_id, event_type, start_time_ms, end_time_ms,
+                    source, confidence, review_status, annotator, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(event.event_id, sample_id, event.event_type, event.start_time_ms, event.end_time_ms,
+                      event.source, event.confidence, event.review_status, event.annotator, event.revision)
+                     for index, event in enumerate(new_events)])
+                connection.execute("DELETE FROM persons WHERE sample_id = ?", (sample_id,))
+                connection.executemany("""INSERT INTO persons(person_record_id, sample_id, person_id, track_id, age_group,
+                    face_familiarity, body_reid_familiarity, source, confidence, review_status, annotator, revision)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(person.person_record_id, sample_id, person.person_id, person.track_id, person.age_group,
+                      person.face_familiarity, person.body_reid_familiarity, person.source, person.confidence,
+                      person.review_status, person.annotator, person.revision) for index, person in enumerate(new_people)])
+                new_revision = current + 1
+                connection.execute("UPDATE samples SET revision = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE sample_id = ?", (new_revision, sample_id))
+                connection.execute("INSERT INTO annotation_revisions(sample_id, revision, actor, summary, before_json, after_json, app_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))", (sample_id, new_revision, actor, summary, before_json, after_json, "video-labeler/1"))
+                return new_revision
+        except sqlite3.IntegrityError as exc:
+            raise StorageError(f"annotation replacement failed: {exc}") from exc
+
     def replace_persons(self, sample_id: str, people: Sequence[Person], expected_revision: int | None = None) -> int:
         if any(person.sample_id != sample_id for person in people):
             raise ValueError("all persons must belong to sample_id")
@@ -293,13 +353,11 @@ class SQLiteStore:
 
     def get_events(self, sample_id: str) -> list[Event]:
         with self._lock:
-            rows = self._connection.execute("SELECT * FROM events WHERE sample_id = ? ORDER BY event_id", (sample_id,)).fetchall()
-            return [Event(sample_id=row["sample_id"], event_type=row["event_type"], start_time_ms=row["start_time_ms"], end_time_ms=row["end_time_ms"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], event_id=row["event_id"]) for row in rows]
+            return self._events_from_connection(self._connection, sample_id)
 
     def get_persons(self, sample_id: str) -> list[Person]:
         with self._lock:
-            rows = self._connection.execute("SELECT * FROM persons WHERE sample_id = ? ORDER BY person_id", (sample_id,)).fetchall()
-            return [Person(sample_id=row["sample_id"], person_id=row["person_id"], age_group=row["age_group"], face_familiarity=row["face_familiarity"], body_reid_familiarity=row["body_reid_familiarity"], track_id=row["track_id"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], person_record_id=row["person_record_id"]) for row in rows]
+            return self._persons_from_connection(self._connection, sample_id)
 
     def upsert_evidence(self, evidence: Evidence) -> None:
         with self.transaction() as connection:
@@ -386,3 +444,7 @@ class SQLiteStore:
     def get_revisions(self, sample_id: str) -> list[sqlite3.Row]:
         with self._lock:
             return self._connection.execute("SELECT * FROM annotation_revisions WHERE sample_id = ? ORDER BY revision", (sample_id,)).fetchall()
+
+    def get_revision(self, sample_id: str, revision: int) -> sqlite3.Row | None:
+        with self._lock:
+            return self._connection.execute("SELECT * FROM annotation_revisions WHERE sample_id = ? AND revision = ?", (sample_id, revision)).fetchone()
