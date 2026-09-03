@@ -189,6 +189,43 @@ class SQLiteStore:
         except sqlite3.IntegrityError as exc:
             raise StorageError(f"person replacement failed: {exc}") from exc
 
+    def replace_sample_bundle(self, sample: Sample, extra_json: str, events: Sequence[Event], people: Sequence[Person]) -> None:
+        """Atomically upsert sample metadata and replace its child annotations."""
+        if any(event.sample_id != sample.sample_id for event in events):
+            raise ValueError("all events must belong to sample_id")
+        if any(person.sample_id != sample.sample_id for person in people):
+            raise ValueError("all persons must belong to sample_id")
+        try:
+            with self.transaction() as connection:
+                connection.execute(
+                    """INSERT INTO samples(sample_id, dataset_id, relative_path, source_sha256, status,
+                    schema_version, revision, created_at, updated_at, extra_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(sample_id) DO UPDATE SET dataset_id=excluded.dataset_id,
+                    relative_path=excluded.relative_path, source_sha256=excluded.source_sha256,
+                    status=excluded.status, schema_version=excluded.schema_version,
+                    updated_at=excluded.updated_at, extra_json=excluded.extra_json""",
+                    (sample.sample_id, sample.dataset_id, sample.relative_path, sample.source_sha256,
+                     sample.status, sample.schema_version, sample.revision, sample.created_at,
+                     sample.updated_at, extra_json),
+                )
+                connection.execute("DELETE FROM events WHERE sample_id = ?", (sample.sample_id,))
+                connection.executemany("""INSERT INTO events(event_id, sample_id, event_type, start_time_ms, end_time_ms,
+                    source, confidence, review_status, annotator, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(_event_id(event, index), sample.sample_id, event.event_type, event.start_time_ms,
+                      event.end_time_ms, event.source, event.confidence, event.review_status,
+                      event.annotator, event.revision) for index, event in enumerate(events)])
+                connection.execute("DELETE FROM persons WHERE sample_id = ?", (sample.sample_id,))
+                connection.executemany("""INSERT INTO persons(person_record_id, sample_id, person_id, track_id, age_group,
+                    face_familiarity, body_reid_familiarity, source, confidence, review_status, annotator, revision)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(_person_record_id(person, index), sample.sample_id, person.person_id, person.track_id,
+                      person.age_group, person.face_familiarity, person.body_reid_familiarity, person.source,
+                      person.confidence, person.review_status, person.annotator, person.revision)
+                     for index, person in enumerate(people)])
+        except sqlite3.IntegrityError as exc:
+            raise StorageError(f"sample bundle replacement failed: {exc}") from exc
+
     def get_events(self, sample_id: str) -> list[Event]:
         with self._lock:
             rows = self._connection.execute("SELECT * FROM events WHERE sample_id = ? ORDER BY event_id", (sample_id,)).fetchall()

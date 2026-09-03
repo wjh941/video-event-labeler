@@ -21,7 +21,7 @@ from typing import Any, Iterable
 from ..domain import Event, Person, Sample, utc_now
 from ..schema import CURRENT_SCHEMA_VERSION
 from .file_lock import FileLock
-from .sqlite_store import SQLiteStore
+from .sqlite_store import SQLiteStore, StorageError
 
 KNOWN_COLUMNS = (
     "sample_id", "video_path", "lighting", "lighting_evidence", "behavior_class",
@@ -65,14 +65,12 @@ def _normalise_relative_path(value: str, video_root: Path) -> str:
         try:
             candidate = candidate.resolve().relative_to(root)
         except ValueError:
-            # Keep an external source address explicit rather than silently
-            # mapping it to an unrelated path under the selected root.
-            return raw
+            raise ValueError("video_path must be inside video_root")
     else:
         try:
             candidate = (root / candidate).resolve().relative_to(root)
         except ValueError:
-            return raw
+            raise ValueError("video_path must be inside video_root")
     return candidate.as_posix().lstrip("./")
 
 
@@ -110,7 +108,9 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
             dialect = csv.excel
         reader = csv.DictReader(handle, dialect=dialect)
         fields = [field.strip() for field in (reader.fieldnames or []) if field and field.strip()]
-        return fields, [{str(k).strip(): (v or "") for k, v in row.items() if k is not None} for row in reader]
+        if len(fields) != len(set(fields)):
+            raise ValueError("CSV contains duplicate column names")
+        return fields, [{str(k).strip(): (v or "") for k, v in row.items() if k is not None and str(k).strip()} for row in reader]
 
 
 def _json_value(raw: str, default: Any, field_name: str) -> Any:
@@ -204,23 +204,24 @@ def import_csv(path: Path, store: SQLiteStore, video_root: Path) -> ImportReport
     with FileLock(path.with_name(path.name + ".lock")):
         for row_number, row in enumerate(rows, start=2):
             supplied_id = row.get("sample_id", "").strip() or None
-            relative_path = _normalise_relative_path(row.get("video_path", ""), video_root)
-            source_path = video_root / relative_path if relative_path and not Path(relative_path).is_absolute() else Path(row.get("video_path", ""))
-            source_hash = _sha256_file(source_path)
-            sample_id = supplied_id or sample_id_for_path(relative_path, source_hash or "missing")
             try:
+                relative_path = _normalise_relative_path(row.get("video_path", ""), video_root)
+                source_path = video_root / relative_path
+                source_hash = _sha256_file(source_path)
+                sample_id = supplied_id or sample_id_for_path(relative_path, source_hash or "missing")
                 current = store.get_sample(sample_id) or _existing_by_path(store, relative_path)
                 if current and current.source_sha256 != source_hash and (current.source_sha256 or source_hash):
                     report.stale += 1
                     continue
+                canonical_id = current.sample_id if current else sample_id
                 try:
-                    events = _events(row.get("events", ""), sample_id)
-                    people = _people(row.get("person_identity_attributes", ""), sample_id)
+                    events = _events(row.get("events", ""), canonical_id)
+                    people = _people(row.get("person_identity_attributes", ""), canonical_id)
                 except (ValueError, TypeError, OverflowError) as exc:
                     report.errors.append(ImportError(row_number, str(exc), supplied_id))
                     if current is None and row.get("status", "draft").strip() != "reviewed":
-                        sample = Sample(sample_id=sample_id, dataset_id=dataset_id, relative_path=relative_path, source_sha256=source_hash)
-                        store.upsert_sample(sample)
+                        sample = Sample(sample_id=canonical_id, dataset_id=dataset_id, relative_path=relative_path, source_sha256=source_hash)
+                        store.replace_sample_bundle(sample, "{}", [], [])
                         report.created += 1
                     continue
                 extra = _extra_fields(fields, row)
@@ -228,28 +229,20 @@ def import_csv(path: Path, store: SQLiteStore, video_root: Path) -> ImportReport
                 if status not in ("draft", "reviewed", "rejected"):
                     status = "draft"
                 if current:
-                    sample_id = current.sample_id
-                    unchanged = current.relative_path == relative_path and current.source_sha256 == source_hash and current.status == status and current.revision == current.revision
+                    sample_id = canonical_id
+                    unchanged = current.relative_path == relative_path and current.source_sha256 == source_hash and current.status == status
                     existing_extra = store.connection().execute("SELECT extra_json FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
                     if unchanged and (not extra or json.loads(existing_extra[0] or "{}") == extra) and store.get_events(sample_id) == events and store.get_persons(sample_id) == people:
                         report.skipped += 1
                         continue
                     sample = Sample(sample_id=sample_id, dataset_id=dataset_id, relative_path=relative_path, source_sha256=source_hash, status=status, revision=current.revision)
-                    store.upsert_sample(sample)
-                    with store.transaction() as connection:
-                        connection.execute("UPDATE samples SET extra_json = ? WHERE sample_id = ?", (json.dumps(extra, ensure_ascii=False, sort_keys=True), sample_id))
-                    store.replace_events(sample_id, events)
-                    store.replace_persons(sample_id, people)
+                    store.replace_sample_bundle(sample, json.dumps(extra, ensure_ascii=False, sort_keys=True), events, people)
                     report.updated += 1
                 else:
                     sample = Sample(sample_id=sample_id, dataset_id=dataset_id, relative_path=relative_path, source_sha256=source_hash, status=status)
-                    store.upsert_sample(sample)
-                    with store.transaction() as connection:
-                        connection.execute("UPDATE samples SET extra_json = ? WHERE sample_id = ?", (json.dumps(extra, ensure_ascii=False, sort_keys=True), sample_id))
-                    store.replace_events(sample_id, events)
-                    store.replace_persons(sample_id, people)
+                    store.replace_sample_bundle(sample, json.dumps(extra, ensure_ascii=False, sort_keys=True), events, people)
                     report.created += 1
-            except (ValueError, TypeError, OverflowError, KeyError) as exc:
+            except (ValueError, TypeError, OverflowError, KeyError, StorageError) as exc:
                 report.errors.append(ImportError(row_number, str(exc), supplied_id))
     return report
 
