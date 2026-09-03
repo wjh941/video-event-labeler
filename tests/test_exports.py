@@ -29,4 +29,3 @@ def test_jsonl_export_is_deterministic_and_atomic(store, tmp_path):
     export_jsonl(store, output)
     assert output.read_bytes() == first
     assert any(path.name.startswith("train.before_export") for path in tmp_path.iterdir())
-

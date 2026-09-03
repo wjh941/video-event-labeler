@@ -19,4 +19,3 @@ def test_quality_and_stats_allow_zero_people(store):
     stats = dataset_stats(store)
     assert stats["person_count"] == 0
     assert stats["completion_rate"] == 1.0
-

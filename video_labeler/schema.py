@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 def _utc_now() -> str:
@@ -154,6 +154,23 @@ def _migration_v2(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE samples ADD COLUMN extra_json TEXT NOT NULL DEFAULT '{}'")
 
 
+def _migration_v3(connection: sqlite3.Connection) -> None:
+    """Add prediction lineage and human decision fields.
+
+    Columns are additive so existing databases remain readable and migration is
+    safe to retry after an interrupted process.
+    """
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(model_predictions)").fetchall()}
+    if "evidence_ids_json" not in columns:
+        connection.execute("ALTER TABLE model_predictions ADD COLUMN evidence_ids_json TEXT NOT NULL DEFAULT '[]'")
+    if "review_status" not in columns:
+        connection.execute("ALTER TABLE model_predictions ADD COLUMN review_status TEXT NOT NULL DEFAULT 'draft' CHECK(review_status IN ('draft','accepted','rejected'))")
+    if "annotator" not in columns:
+        connection.execute("ALTER TABLE model_predictions ADD COLUMN annotator TEXT")
+    if "decided_at" not in columns:
+        connection.execute("ALTER TABLE model_predictions ADD COLUMN decided_at TEXT")
+
+
 def _upgrade_schema_migrations_table(connection: sqlite3.Connection) -> None:
     """Rebuild a pre-v1 marker table so its timestamp policy is enforced."""
     definition = connection.execute(
@@ -200,6 +217,11 @@ def migrate_schema(connection: sqlite3.Connection, target_version: int = CURRENT
             connection.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (2, _utc_now()))
         elif current >= 2 and target_version >= 2:
             _migration_v2(connection)
+        if current < 3 <= target_version:
+            _migration_v3(connection)
+            connection.execute("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)", (3, _utc_now()))
+        elif current >= 3 and target_version >= 3:
+            _migration_v3(connection)
         if started_transaction:
             connection.commit()
     except Exception:
