@@ -57,8 +57,8 @@ def main() -> int:
         return 2
 
     common = ["--video-root", str(root), "--csv", str(csv_path)]
-    if args.db:
-        common.extend(["--db", str(args.db.expanduser().resolve())])
+    db_path = (args.db or root / "dataset.db").expanduser().resolve()
+    common.extend(["--db", str(db_path)])
     if args.no_browser:
         common.append("--no-browser")
 

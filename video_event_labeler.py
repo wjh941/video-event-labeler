@@ -25,6 +25,7 @@ from urllib.parse import unquote, urlparse
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
 from video_labeler.storage.sqlite_store import SQLiteStore
+from video_labeler.media_index import index_media
 
 
 BEHAVIOR_LABELS = (
@@ -612,6 +613,7 @@ class AppState:
         store = SQLiteStore(db_path.expanduser().resolve())
         if csv_path and csv_path.is_file():
             import_csv(csv_path, store, root)
+        index_media(root, store)
         state = cls(csv_path=csv_path.resolve() if csv_path else None, video_root=root)
         state.store = store
         state.service = AnnotationService(store, root)

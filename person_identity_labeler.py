@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
 from video_labeler.storage.sqlite_store import SQLiteStore
+from video_labeler.media_index import index_media
 
 
 ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "gb18030", "cp936", "cp1252")
@@ -379,6 +380,7 @@ class AppState:
         store = SQLiteStore(db_path.expanduser().resolve())
         if csv_path and csv_path.is_file():
             import_csv(csv_path, store, root)
+        index_media(root, store)
         state = cls(csv_path, root, service=AnnotationService(store, root), store=store)
         state._refresh_db_rows()
         return state
