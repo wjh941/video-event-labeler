@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from ..domain import Event, Person, Sample
+from ..domain import Event, MediaAsset, Person, Sample
 from ..schema import migrate_schema
 from .file_lock import FileLock
 
@@ -125,6 +125,71 @@ class SQLiteStore:
         with self._lock:
             row = self._connection.execute("SELECT * FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
             return self._sample_from_row(row) if row else None
+
+    def upsert_media_asset(self, asset: MediaAsset) -> None:
+        """Insert or replace one asset without changing the sample revision.
+
+        Asset identity is the stable ``(sample_id, modality, uri)`` tuple.  Keeping
+        media metadata separate from annotation revisions lets a re-index refresh
+        file hashes/probe results without marking human labels as edited.
+        """
+        try:
+            with self.transaction() as connection:
+                connection.execute(
+                    """INSERT INTO media_assets(
+                        sample_id, modality, uri, duration_ms, fps, width, height,
+                        metadata_json, source_sha256, probe_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(sample_id, modality, uri) DO UPDATE SET
+                        duration_ms=excluded.duration_ms,
+                        fps=excluded.fps,
+                        width=excluded.width,
+                        height=excluded.height,
+                        metadata_json=excluded.metadata_json,
+                        source_sha256=excluded.source_sha256,
+                        probe_status=excluded.probe_status""",
+                    (
+                        asset.sample_id,
+                        asset.modality,
+                        asset.uri,
+                        asset.duration_ms,
+                        asset.fps,
+                        asset.width,
+                        asset.height,
+                        asset.metadata_json,
+                        asset.source_sha256,
+                        asset.probe_status,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StorageError(f"media asset upsert failed: {exc}") from exc
+
+    def get_media_assets(self, sample_id: str) -> list[MediaAsset]:
+        """Return all assets for a sample in deterministic modality/URI order."""
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT sample_id, modality, uri, duration_ms, fps, width, height,
+                    metadata_json, source_sha256, probe_status
+                    FROM media_assets
+                    WHERE sample_id = ?
+                    ORDER BY modality, uri, asset_id""",
+                (sample_id,),
+            ).fetchall()
+            return [
+                MediaAsset(
+                    sample_id=row["sample_id"],
+                    modality=row["modality"],
+                    uri=row["uri"],
+                    duration_ms=row["duration_ms"],
+                    fps=row["fps"],
+                    width=row["width"],
+                    height=row["height"],
+                    metadata_json=row["metadata_json"],
+                    source_sha256=row["source_sha256"],
+                    probe_status=row["probe_status"],
+                )
+                for row in rows
+            ]
 
     def list_samples(self, limit: int, offset: int, status: str | None = None) -> list[Sample]:
         if limit < 0 or offset < 0:
