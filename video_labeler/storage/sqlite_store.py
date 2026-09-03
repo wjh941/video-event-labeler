@@ -315,8 +315,16 @@ class SQLiteStore:
             rows = self._connection.execute("SELECT * FROM evidence WHERE sample_id = ? ORDER BY evidence_id", (sample_id,)).fetchall()
             return [Evidence(sample_id=r["sample_id"], modality=r["modality"], start_time_ms=r["start_time_ms"], end_time_ms=r["end_time_ms"], uri=r["uri"], text=r["text"], source=r["source"], confidence=r["confidence"], evidence_id=r["evidence_id"]) for r in rows]
 
+    def get_evidence_by_id(self, evidence_id: str) -> Evidence | None:
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM evidence WHERE evidence_id = ?", (evidence_id,)).fetchone()
+            if row is None:
+                return None
+            return Evidence(sample_id=row["sample_id"], modality=row["modality"], start_time_ms=row["start_time_ms"], end_time_ms=row["end_time_ms"], uri=row["uri"], text=row["text"], source=row["source"], confidence=row["confidence"], evidence_id=row["evidence_id"])
+
     def upsert_prediction(self, prediction: Prediction) -> None:
         import json
+        self.validate_evidence_references(prediction.sample_id, prediction.evidence_ids)
         with self.transaction() as connection:
             connection.execute("""INSERT INTO model_predictions(prediction_id, sample_id, task, label_json, model_name,
                 model_version, confidence, created_at, evidence_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -324,6 +332,22 @@ class SQLiteStore:
                 (prediction.prediction_id, prediction.sample_id, prediction.task, prediction.label_json,
                  prediction.model_name, prediction.model_version, prediction.confidence, prediction.created_at,
                  json.dumps(list(prediction.evidence_ids), separators=(",", ":"))))
+
+    def validate_evidence_references(self, sample_id: str, evidence_ids: Sequence[str]) -> None:
+        if not evidence_ids:
+            return
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT evidence_id, sample_id FROM evidence WHERE evidence_id IN (%s)"
+                % ",".join("?" for _ in evidence_ids),
+                tuple(evidence_ids),
+            ).fetchall()
+        found = {row["evidence_id"]: row["sample_id"] for row in rows}
+        for evidence_id in evidence_ids:
+            if evidence_id not in found:
+                raise ValueError(f"unknown evidence reference: {evidence_id}")
+            if found[evidence_id] != sample_id:
+                raise ValueError(f"evidence reference belongs to another sample: {evidence_id}")
 
     def get_prediction(self, prediction_id: str) -> Prediction | None:
         with self._lock:
