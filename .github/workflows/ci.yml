@@ -16,4 +16,4 @@ jobs:
       - run: python -m compileall video_labeler video_event_labeler.py person_identity_labeler.py run_video_annotation.py
       - run: ruff check video_labeler
       - run: mypy video_labeler --exclude 'video_labeler/(storage|services|quality)'
-      - run: python -m pytest -q
+      - run: python -m pytest -q -p no:cacheprovider
