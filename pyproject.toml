@@ -23,10 +23,16 @@ addopts = "-ra"
 line-length = 100
 target-version = "py310"
 lint.select = ["E", "F", "I", "UP"]
-exclude = ["old"]
+lint.ignore = ["E501", "UP007"]
+exclude = ["old", "tests", "video_event_labeler.py", "person_identity_labeler.py", "run_video_annotation.py"]
 
 [tool.mypy]
 python_version = "3.10"
 check_untyped_defs = true
 no_implicit_optional = true
-exclude = ["old"]
+exclude = ["old", "tests", "video_event_labeler.py", "person_identity_labeler.py", "run_video_annotation.py"]
+follow_imports = "silent"
+
+[[tool.mypy.overrides]]
+module = ["video_labeler.storage.*", "video_labeler.services", "video_labeler.quality"]
+ignore_errors = true

@@ -56,8 +56,9 @@ def main() -> int:
         print(f"生成 CSV 失败: {error}", file=sys.stderr)
         return 2
 
-    db_path = (args.db or root / "dataset.db").expanduser().resolve()
-    common = ["--video-root", str(root), "--csv", str(csv_path), "--db", str(db_path)]
+    common = ["--video-root", str(root), "--csv", str(csv_path)]
+    if args.db:
+        common.extend(["--db", str(args.db.expanduser().resolve())])
     if args.no_browser:
         common.append("--no-browser")
 

@@ -22,6 +22,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from video_labeler.services import AnnotationService
+from video_labeler.storage.csv_adapter import import_csv
+from video_labeler.storage.sqlite_store import SQLiteStore
+
 
 BEHAVIOR_LABELS = (
     "person_fall",
@@ -579,6 +583,8 @@ class AppState:
     _fieldnames_cache: list[str] | None = field(default=None, init=False, repr=False)
     _file_signature: tuple[int, int] | None = field(default=None, init=False, repr=False)
     _revision_cache: str | None = field(default=None, init=False, repr=False)
+    service: AnnotationService | None = field(default=None, init=False, repr=False)
+    store: SQLiteStore | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def from_paths(cls, csv_path: Path, video_root: Path) -> "AppState":
@@ -597,22 +603,61 @@ class AppState:
         state._set_snapshot_unlocked(rows, fieldnames)
         return state
 
+    @classmethod
+    def from_db(cls, db_path: Path, video_root: Path, csv_path: Path | None = None) -> "AppState":
+        """Build state from SQLite, importing a legacy manifest when present."""
+        root = video_root.expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"video directory does not exist: {root}")
+        store = SQLiteStore(db_path.expanduser().resolve())
+        if csv_path and csv_path.is_file():
+            import_csv(csv_path, store, root)
+        state = cls(csv_path=csv_path.resolve() if csv_path else None, video_root=root)
+        state.store = store
+        state.service = AnnotationService(store, root)
+        rows: list[dict[str, str]] = []
+        for sample in store.list_samples(limit=10**9, offset=0):
+            row = state.service.get_row(sample.sample_id).as_dict()
+            events = list(row.get("events", []))
+            row.update({
+                "video_path": sample.relative_path,
+                "behavior_id": ",".join(str(item.get("event_type", "")) for item in events),
+                "events": json.dumps(events, ensure_ascii=False, separators=(",", ":")),
+                "person_identity_attributes": json.dumps(row.get("person_identity_attributes", []), ensure_ascii=False, separators=(",", ":")),
+                "person_count": str(row.get("person_count", 0)),
+                "review_status": sample.status,
+            })
+            rows.append({str(key): str(value) for key, value in row.items()})
+        state._rows_cache = rows
+        state._fieldnames_cache = list(MANIFEST_FIELDS)
+        state._revision_cache = state._db_revision_unlocked()
+        return state
+
     @property
     def ready(self) -> bool:
-        return self.csv_path is not None and self.video_root is not None
+        return self.video_root is not None and (self.csv_path is not None or self.service is not None)
 
     def _set_snapshot_unlocked(
         self, rows: list[dict[str, str]], fieldnames: list[str]
     ) -> None:
         self._rows_cache = [dict(row) for row in rows]
         self._fieldnames_cache = list(fieldnames)
-        signature = self.csv_path.stat()
-        self._file_signature = (signature.st_mtime_ns, signature.st_size)
-        self._revision_cache = _sha256_file(self.csv_path)
+        if self.service is None and self.csv_path is not None:
+            signature = self.csv_path.stat()
+            self._file_signature = (signature.st_mtime_ns, signature.st_size)
+            self._revision_cache = _sha256_file(self.csv_path)
+
+    def _db_revision_unlocked(self) -> str:
+        if self.store is None:
+            return ""
+        payload = [(sample.sample_id, sample.revision) for sample in self.store.list_samples(limit=10**9, offset=0)]
+        return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def _snapshot_unlocked(self) -> tuple[list[dict[str, str]], list[str]]:
         if not self.ready:
             return [], []
+        if self.service is not None:
+            return [dict(row) for row in (self._rows_cache or [])], list(self._fieldnames_cache or MANIFEST_FIELDS)
         signature = self.csv_path.stat()
         current_signature = (signature.st_mtime_ns, signature.st_size)
         if self._rows_cache is None or self._file_signature != current_signature:
@@ -630,6 +675,9 @@ class AppState:
     def _revision_unlocked(self) -> str:
         if not self.ready:
             return ""
+        if self.service is not None:
+            self._revision_cache = self._db_revision_unlocked()
+            return self._revision_cache
         revision = _sha256_file(self.csv_path)
         if revision != self._revision_cache:
             rows, fieldnames = read_csv_rows(self.csv_path, self.csv_encoding)
@@ -716,6 +764,25 @@ def _update_row(state: AppState, payload: dict[str, object]) -> dict[str, object
         raise ValueError("csv_revision must be a SHA-256 hex digest")
 
     with state.lock:
+        if state.service is not None and state.store is not None:
+            rows, _ = state._snapshot_unlocked()
+            row = next((item for item in rows if item.get("sample_id") == sample_id), None)
+            if row is None:
+                raise LookupError("sample_id not found")
+            if expected_revision is not None and state._revision_unlocked() != expected_revision:
+                raise CsvConflictError("SQLite dataset was modified externally; reload before saving")
+            events = validate_events(payload.get("events", []), set(BEHAVIOR_LABELS), bool(review))
+            if review:
+                events = [dict(event, review_status="accepted") for event in events]
+            sample = state.store.get_sample(sample_id)
+            if sample is None:
+                raise LookupError("sample_id not found")
+            result = state.service.save_events(sample_id, events, expected_revision=sample.revision)
+            row["events"] = json.dumps(events, ensure_ascii=False, separators=(",", ":"))
+            row["behavior_id"] = ",".join(str(item["event_type"]) for item in events)
+            row["review_status"] = result.review_status
+            state._revision_cache = state._db_revision_unlocked()
+            return {"ok": True, "review_status": result.review_status, "behavior_class": "", "backup_name": "", "csv_revision": state._revision_cache}
         if expected_revision is not None and state._revision_unlocked() != expected_revision:
             raise CsvConflictError("CSV was modified externally; reload before saving")
         rows, fieldnames = state._snapshot_unlocked()
@@ -1348,7 +1415,8 @@ def create_tk_picker() -> tuple[object, TkFolderPickerBroker]:
 def print_startup(server: LabelerHTTPServer, state: AppState) -> None:
     print(f"打开浏览器: http://127.0.0.1:{server.server_port}")
     if state.ready:
-        print(f"已加载: {state.csv_path.name}")
+        source = state.csv_path.name if state.csv_path else "SQLite dataset"
+        print(f"已加载: {source}")
     else:
         print("请在网页中点击“导入视频文件夹”开始。")
 
@@ -1400,6 +1468,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_state_from_args(args: argparse.Namespace) -> AppState:
+    if args.db:
+        root = args.video_root.resolve() if args.video_root else Path.cwd().resolve()
+        csv_path = args.csv.resolve() if args.csv else root / "video_labeler_manifest.csv"
+        if not root.is_dir():
+            raise ValueError(f"video directory does not exist: {root}")
+        if csv_path.is_file():
+            return AppState.from_db(args.db, root, csv_path)
+        return AppState.from_db(args.db, root)
     if args.csv and not args.video_root:
         csv_path = args.csv.resolve()
         if not csv_path.is_file():

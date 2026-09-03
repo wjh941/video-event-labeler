@@ -33,6 +33,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
+from video_labeler.services import AnnotationService
+from video_labeler.storage.csv_adapter import import_csv
+from video_labeler.storage.sqlite_store import SQLiteStore
+
 
 ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "gb18030", "cp936", "cp1252")
 MS_RE = r'(?:"?(-?\d+(?:\.\d+)?)\s*(?:ms)?"?)'
@@ -337,23 +341,68 @@ def serialize_csv(
 class AppState:
     def __init__(
         self,
-        csv_path: Path,
+        csv_path: Optional[Path],
         video_root: Path,
         default_video_path: Optional[Path] = None,
+        service: Optional[AnnotationService] = None,
+        store: Optional[SQLiteStore] = None,
     ):
-        (
-            self.encoding,
-            self.delimiter,
-            self.fieldnames,
-            self.rows,
-        ) = detect_csv_format(csv_path)
-        ensure_required_fields(self.fieldnames, self.rows)
-        self.csv_path = csv_path.resolve()
+        if service is None:
+            if csv_path is None:
+                raise ValueError("csv_path is required without SQLite service")
+            (
+                self.encoding,
+                self.delimiter,
+                self.fieldnames,
+                self.rows,
+            ) = detect_csv_format(csv_path)
+            ensure_required_fields(self.fieldnames, self.rows)
+            self.csv_path = csv_path.resolve()
+        else:
+            self.encoding, self.delimiter = "utf-8-sig", ","
+            self.fieldnames = ["sample_id", "video_path", "person_count", "person_identity_attributes"]
+            self.rows = []
+            self.csv_path = csv_path.resolve() if csv_path else None
         self.video_root = video_root.resolve()
         self.default_video_path = (
             default_video_path.resolve() if default_video_path else None
         )
         self.lock = threading.RLock()
+        self.service = service
+        self.store = store
+
+    @classmethod
+    def from_db(cls, db_path: Path, video_root: Path, csv_path: Optional[Path] = None) -> "AppState":
+        root = video_root.expanduser().resolve()
+        if not root.is_dir():
+            raise ValueError(f"video directory does not exist: {root}")
+        store = SQLiteStore(db_path.expanduser().resolve())
+        if csv_path and csv_path.is_file():
+            import_csv(csv_path, store, root)
+        state = cls(csv_path, root, service=AnnotationService(store, root), store=store)
+        state._refresh_db_rows()
+        return state
+
+    def _refresh_db_rows(self) -> None:
+        if self.service is None or self.store is None:
+            return
+        self.rows = []
+        for sample in self.store.list_samples(limit=10**9, offset=0):
+            item = self.service.get_row(sample.sample_id).as_dict()
+            self.rows.append({
+                "sample_id": sample.sample_id,
+                "video_path": sample.relative_path,
+                "person_count": str(item.get("person_count", 0)),
+                "person_identity_attributes": json.dumps(item.get("person_identity_attributes", []), ensure_ascii=False, separators=(",", ":")),
+            })
+
+    def db_revision(self) -> str:
+        if self.store is None:
+            return self.csv_revision()
+        digest = hashlib.sha256()
+        for sample in self.store.list_samples(limit=10**9, offset=0):
+            digest.update(f"{sample.sample_id}:{sample.revision};".encode("utf-8"))
+        return digest.hexdigest()
 
     def video_path_for_row(self, index: int) -> Path:
         row = self.rows[index]
@@ -394,10 +443,12 @@ class AppState:
 
     def state_payload(self) -> Dict[str, Any]:
         with self.lock:
+            if self.service is not None:
+                self._refresh_db_rows()
             return {
                 "video_root": str(self.video_root),
                 "csv_path": str(self.csv_path),
-                "csv_revision": self.csv_revision(),
+                "csv_revision": self.db_revision(),
                 "row_count": len(self.rows),
                 "rows": [self.row_payload(i) for i in range(len(self.rows))],
             }
@@ -407,6 +458,27 @@ class AppState:
             row_index = int(payload.get("row_index"))
         except (TypeError, ValueError) as exc:
             raise ValueError("row_index 无效") from exc
+
+        if self.service is not None and self.store is not None:
+            with self.lock:
+                self._refresh_db_rows()
+                if not 0 <= row_index < len(self.rows):
+                    raise ValueError("row_index out of range")
+                sample_id = str(payload.get("sample_id") or self.rows[row_index].get("sample_id") or "").strip()
+                sample = self.store.get_sample(sample_id)
+                if sample is None:
+                    raise ValueError("sample_id not found")
+                expected = payload.get("csv_revision")
+                if expected not in (None, "") and expected != self.db_revision():
+                    raise CsvConflictError("SQLite dataset was modified externally; reload before saving")
+                raw_people = payload.get("people", parse_person_attributes(self.rows[row_index].get("person_identity_attributes", "")))
+                if not isinstance(raw_people, list):
+                    raise ValueError("people must be an array")
+                result = self.service.save_people(sample_id, raw_people, expected_revision=sample.revision)
+                self._refresh_db_rows()
+                return {"sample_id": sample_id, "person_count": len(raw_people),
+                        "person_identity_attributes": self.rows[row_index]["person_identity_attributes"],
+                        "csv_revision": self.db_revision()}
 
         if not 0 <= row_index < len(self.rows):
             raise ValueError("row_index 超出 CSV 行范围")
@@ -1498,7 +1570,7 @@ def main() -> int:
     if video_path is not None and not video_path.is_file():
         print(f"视频文件不存在: {video_path}", file=sys.stderr)
         return 2
-    if not csv_path.is_file():
+    if not args.db and not csv_path.is_file():
         print(f"CSV 文件不存在: {csv_path}", file=sys.stderr)
         return 2
     if not video_root.is_dir():
@@ -1506,7 +1578,7 @@ def main() -> int:
         return 2
 
     try:
-        state = AppState(csv_path.resolve(), video_root.resolve(), video_path)
+        state = AppState.from_db(Path(args.db), video_root.resolve(), csv_path if csv_path.is_file() else None) if args.db else AppState(csv_path.resolve(), video_root.resolve(), video_path)
     except (OSError, ValueError) as exc:
         print(f"读取文件失败: {exc}", file=sys.stderr)
         return 2
