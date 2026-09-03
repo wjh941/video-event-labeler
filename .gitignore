@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 .worktrees/
 .superpowers/
+docs/superpowers/plans/*-report.md
+docs/superpowers/plans/*-review.diff
