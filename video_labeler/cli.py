@@ -1,0 +1,51 @@
+"""Command-line operations for SQLite annotation datasets."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+from .quality import dataset_stats, export_jsonl, validate_dataset
+from .storage.csv_adapter import export_csv, import_csv
+from .storage.sqlite_store import SQLiteStore
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m video_labeler")
+    commands = parser.add_subparsers(dest="command", required=True)
+    imp = commands.add_parser("import-csv"); imp.add_argument("--csv", required=True, type=Path); imp.add_argument("--video-root", required=True, type=Path); imp.add_argument("--db", required=True, type=Path)
+    exp_csv = commands.add_parser("export-csv"); exp_csv.add_argument("--csv", required=True, type=Path); exp_csv.add_argument("--video-root", required=True, type=Path); exp_csv.add_argument("--db", required=True, type=Path)
+    validate = commands.add_parser("validate"); validate.add_argument("--db", required=True, type=Path)
+    stats = commands.add_parser("stats"); stats.add_argument("--db", required=True, type=Path)
+    export = commands.add_parser("export"); export.add_argument("--db", required=True, type=Path); export.add_argument("--format", choices=("jsonl",), required=True); export.add_argument("--output", "--path", "--csv", dest="output", required=True, type=Path)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    store = SQLiteStore(args.db)
+    try:
+        if args.command == "import-csv":
+            report = import_csv(args.csv, store, args.video_root)
+            print(json.dumps({"created": report.created, "updated": report.updated, "skipped": report.skipped, "stale": report.stale, "errors": [item.__dict__ for item in report.errors]}, ensure_ascii=False))
+            return 1 if report.errors else 0
+        if args.command == "export-csv":
+            report = export_csv(store, args.csv, args.video_root)
+            print(json.dumps({"path": str(report.path), "sample_count": report.sample_count}, ensure_ascii=False))
+            return 0
+        if args.command == "validate":
+            report = validate_dataset(store)
+            print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+            return 0 if report.ok else 1
+        if args.command == "stats":
+            print(json.dumps(dataset_stats(store), ensure_ascii=False, sort_keys=True))
+            return 0
+        report = export_jsonl(store, args.output)
+        print(json.dumps({"path": str(report.path), "sample_count": report.sample_count}, ensure_ascii=False))
+        return 0
+    finally:
+        store.close()
+
+
+__all__ = ["build_parser", "main"]
