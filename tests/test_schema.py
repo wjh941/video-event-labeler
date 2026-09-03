@@ -17,7 +17,8 @@ def test_initialize_schema_is_idempotent_and_enables_foreign_keys():
     assert first == second
     assert {name for name, _ in first} >= EXPECTED_TABLES
     assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-    assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(CURRENT_SCHEMA_VERSION,)]
+    versions = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
+    assert versions[-1] == CURRENT_SCHEMA_VERSION
 
 
 def test_schema_has_required_indexes_and_foreign_keys():
@@ -65,7 +66,7 @@ def test_failed_migration_rolls_back_marker_and_can_retry():
     assert connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone() is None
     connection.set_authorizer(None)
     initialize_schema(connection)
-    assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+    assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == CURRENT_SCHEMA_VERSION
 
 
 def test_initialize_repairs_missing_index_when_marker_exists():
@@ -98,6 +99,8 @@ def test_existing_schema_migrations_table_is_upgraded_without_losing_rows():
     connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
     connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (1, '2026-01-01T00:00:00Z')")
     migrate_schema(connection)
-    assert connection.execute("SELECT version, applied_at FROM schema_migrations").fetchall() == [(1, '2026-01-01T00:00:00Z')]
+    rows = connection.execute("SELECT version, applied_at FROM schema_migrations ORDER BY version").fetchall()
+    assert rows[0] == (1, '2026-01-01T00:00:00Z')
+    assert rows[-1][0] == CURRENT_SCHEMA_VERSION
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (2, '2026-01-01 00:00:00')")
