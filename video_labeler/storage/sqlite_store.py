@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Sequence
 
-from ..domain import Event, MediaAsset, Person, Sample
+from ..domain import Event, Evidence, MediaAsset, Person, Prediction, Sample
 from ..schema import migrate_schema
 from .file_lock import FileLock
 
@@ -300,3 +300,65 @@ class SQLiteStore:
         with self._lock:
             rows = self._connection.execute("SELECT * FROM persons WHERE sample_id = ? ORDER BY person_id", (sample_id,)).fetchall()
             return [Person(sample_id=row["sample_id"], person_id=row["person_id"], age_group=row["age_group"], face_familiarity=row["face_familiarity"], body_reid_familiarity=row["body_reid_familiarity"], track_id=row["track_id"], source=row["source"], confidence=row["confidence"], review_status=row["review_status"], annotator=row["annotator"], revision=row["revision"], person_record_id=row["person_record_id"]) for row in rows]
+
+    def upsert_evidence(self, evidence: Evidence) -> None:
+        with self.transaction() as connection:
+            connection.execute("""INSERT INTO evidence(evidence_id, sample_id, modality, start_time_ms, end_time_ms, uri, text, source, confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(evidence_id) DO UPDATE SET modality=excluded.modality,
+                start_time_ms=excluded.start_time_ms, end_time_ms=excluded.end_time_ms, uri=excluded.uri,
+                text=excluded.text, source=excluded.source, confidence=excluded.confidence""",
+                (evidence.evidence_id, evidence.sample_id, evidence.modality, evidence.start_time_ms,
+                 evidence.end_time_ms, evidence.uri, evidence.text, evidence.source, evidence.confidence))
+
+    def get_evidence(self, sample_id: str) -> list[Evidence]:
+        with self._lock:
+            rows = self._connection.execute("SELECT * FROM evidence WHERE sample_id = ? ORDER BY evidence_id", (sample_id,)).fetchall()
+            return [Evidence(sample_id=r["sample_id"], modality=r["modality"], start_time_ms=r["start_time_ms"], end_time_ms=r["end_time_ms"], uri=r["uri"], text=r["text"], source=r["source"], confidence=r["confidence"], evidence_id=r["evidence_id"]) for r in rows]
+
+    def upsert_prediction(self, prediction: Prediction) -> None:
+        import json
+        with self.transaction() as connection:
+            connection.execute("""INSERT INTO model_predictions(prediction_id, sample_id, task, label_json, model_name,
+                model_version, confidence, created_at, evidence_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(prediction_id) DO UPDATE SET label_json=excluded.label_json, confidence=excluded.confidence""",
+                (prediction.prediction_id, prediction.sample_id, prediction.task, prediction.label_json,
+                 prediction.model_name, prediction.model_version, prediction.confidence, prediction.created_at,
+                 json.dumps(list(prediction.evidence_ids), separators=(",", ":"))))
+
+    def get_prediction(self, prediction_id: str) -> Prediction | None:
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM model_predictions WHERE prediction_id = ?", (prediction_id,)).fetchone()
+            if row is None:
+                return None
+            import json
+            return Prediction(prediction_id=row["prediction_id"], sample_id=row["sample_id"], task=row["task"], label_json=row["label_json"], model_name=row["model_name"], model_version=row["model_version"], confidence=row["confidence"], created_at=row["created_at"], evidence_ids=tuple(json.loads(row["evidence_ids_json"] or "[]")))
+
+    def prediction_record(self, prediction_id: str):
+        """Return prediction plus its human decision metadata."""
+        with self._lock:
+            row = self._connection.execute("SELECT review_status, annotator, decided_at FROM model_predictions WHERE prediction_id = ?", (prediction_id,)).fetchone()
+            if row is None:
+                return None
+            prediction = self.get_prediction(prediction_id)
+            return prediction, row["review_status"], row["annotator"], row["decided_at"]
+
+    def list_predictions(self, sample_id: str) -> list[Prediction]:
+        with self._lock:
+            rows = self._connection.execute("SELECT prediction_id FROM model_predictions WHERE sample_id = ? ORDER BY prediction_id", (sample_id,)).fetchall()
+        return [prediction for row in rows if (prediction := self.get_prediction(row["prediction_id"])) is not None]
+
+    def decide_prediction(self, prediction_id: str, status: str, annotator: str, decided_at: str) -> None:
+        if status not in ("accepted", "rejected"):
+            raise ValueError("status must be accepted or rejected")
+        with self.transaction() as connection:
+            changed = connection.execute("UPDATE model_predictions SET review_status=?, annotator=?, decided_at=? WHERE prediction_id=? AND review_status='draft'", (status, annotator, decided_at, prediction_id)).rowcount
+            if not changed:
+                raise KeyError(f"unknown or already decided prediction: {prediction_id}")
+
+    def add_revision(self, sample_id: str, revision: int, actor: str, summary: str, before_json: str | None, after_json: str | None, app_version: str = "video-labeler/1") -> None:
+        with self.transaction() as connection:
+            connection.execute("INSERT INTO annotation_revisions(sample_id, revision, actor, summary, before_json, after_json, app_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))", (sample_id, revision, actor, summary, before_json, after_json, app_version))
+
+    def get_revisions(self, sample_id: str) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._connection.execute("SELECT * FROM annotation_revisions WHERE sample_id = ? ORDER BY revision", (sample_id,)).fetchall()

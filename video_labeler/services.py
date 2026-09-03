@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .domain import Event, Person
+from .domain import Event, Person, Prediction
+from .providers import AnnotationProvider
 from .storage.csv_adapter import export_csv
 from .storage.sqlite_store import SQLiteStore
 
@@ -46,9 +47,10 @@ class RowPayload:
 
 
 class AnnotationService:
-    def __init__(self, store: SQLiteStore, video_root: Path) -> None:
+    def __init__(self, store: SQLiteStore, video_root: Path, provider: AnnotationProvider | None = None) -> None:
         self.store = store
         self.video_root = Path(video_root).resolve()
+        self.provider = provider
 
     @staticmethod
     def _event(value: Event | Mapping[str, Any], sample_id: str) -> Event:
@@ -114,6 +116,20 @@ class AnnotationService:
 
     def export_csv(self, path: Path):
         return export_csv(self.store, Path(path), self.video_root)
+
+    def predict(self, sample_id: str) -> list[Prediction]:
+        if self.provider is None:
+            raise RuntimeError("no annotation provider configured")
+        sample = self.store.get_sample(sample_id)
+        if sample is None:
+            raise KeyError(sample_id)
+        predictions = list(self.provider.predict(sample))
+        for prediction in predictions:
+            self.store.upsert_prediction(prediction)
+        return predictions
+
+    def get_prediction(self, prediction_id: str) -> Prediction | None:
+        return self.store.get_prediction(prediction_id)
 
 
 __all__ = ["AnnotationService", "RowPayload", "SaveResult"]
