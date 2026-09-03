@@ -27,22 +27,22 @@ def main(argv: list[str] | None = None) -> int:
     store = SQLiteStore(args.db)
     try:
         if args.command == "import-csv":
-            report = import_csv(args.csv, store, args.video_root)
-            print(json.dumps({"created": report.created, "updated": report.updated, "skipped": report.skipped, "stale": report.stale, "errors": [item.__dict__ for item in report.errors]}, ensure_ascii=False))
-            return 1 if report.errors else 0
+            import_report = import_csv(args.csv, store, args.video_root)
+            print(json.dumps({"created": import_report.created, "updated": import_report.updated, "skipped": import_report.skipped, "stale": import_report.stale, "errors": [item.__dict__ for item in import_report.errors]}, ensure_ascii=False))
+            return 1 if import_report.errors else 0
         if args.command == "export-csv":
-            report = export_csv(store, args.csv, args.video_root)
-            print(json.dumps({"path": str(report.path), "sample_count": report.sample_count}, ensure_ascii=False))
+            csv_report = export_csv(store, args.csv, args.video_root)
+            print(json.dumps({"path": str(csv_report.path), "sample_count": csv_report.sample_count}, ensure_ascii=False))
             return 0
         if args.command == "validate":
-            report = validate_dataset(store)
-            print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
-            return 0 if report.ok else 1
+            quality_report = validate_dataset(store)
+            print(json.dumps(quality_report.to_dict(), ensure_ascii=False, indent=2))
+            return 0 if quality_report.ok else 1
         if args.command == "stats":
             print(json.dumps(dataset_stats(store), ensure_ascii=False, sort_keys=True))
             return 0
-        report = export_jsonl(store, args.output)
-        print(json.dumps({"path": str(report.path), "sample_count": report.sample_count}, ensure_ascii=False))
+        jsonl_report = export_jsonl(store, args.output)
+        print(json.dumps({"path": str(jsonl_report.path), "sample_count": jsonl_report.sample_count}, ensure_ascii=False))
         return 0
     finally:
         store.close()

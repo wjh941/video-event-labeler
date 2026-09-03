@@ -653,6 +653,26 @@ class AppState:
         payload = [(sample.sample_id, sample.revision) for sample in self.store.list_samples(limit=10**9, offset=0)]
         return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode("utf-8")).hexdigest()
 
+    def _refresh_db_snapshot(self) -> None:
+        if self.service is None or self.store is None:
+            return
+        rows: list[dict[str, str]] = []
+        for sample in self.store.list_samples(limit=10**9, offset=0):
+            payload = self.service.get_row(sample.sample_id).as_dict()
+            events = list(payload.get("events", []))
+            payload.update({
+                "video_path": sample.relative_path,
+                "behavior_id": ",".join(str(item.get("event_type", "")) for item in events),
+                "events": json.dumps(events, ensure_ascii=False, separators=(",", ":")),
+                "person_identity_attributes": json.dumps(payload.get("person_identity_attributes", []), ensure_ascii=False, separators=(",", ":")),
+                "person_count": str(payload.get("person_count", 0)),
+                "review_status": sample.status,
+            })
+            rows.append({str(key): str(value) for key, value in payload.items()})
+        self._rows_cache = rows
+        self._fieldnames_cache = list(MANIFEST_FIELDS)
+        self._revision_cache = self._db_revision_unlocked()
+
     def _snapshot_unlocked(self) -> tuple[list[dict[str, str]], list[str]]:
         if not self.ready:
             return [], []
@@ -720,7 +740,11 @@ def apply_imported_root(state: AppState, root: Path) -> tuple[Path, int]:
         state.csv_path = manifest.resolve()
         state.video_root = root
         state.csv_encoding = encoding
-        state._set_snapshot_unlocked(rows, fieldnames)
+        if state.service is not None and state.store is not None:
+            import_csv(manifest, state.store, root)
+            state._refresh_db_snapshot()
+        else:
+            state._set_snapshot_unlocked(rows, fieldnames)
     return manifest, added
 
 
