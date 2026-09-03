@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
 from video_labeler.storage.sqlite_store import SQLiteStore
+from video_labeler.storage.sqlite_store import ConflictError
 from video_labeler.media_index import index_media
 
 
@@ -1443,6 +1444,13 @@ class VideoCsvHandler(BaseHTTPRequestHandler):
         if route == "/api/state":
             self.send_json(self.state.state_payload())
             return
+        if route.startswith("/api/predictions/") and self.state.service is not None:
+            prediction = self.state.service.get_prediction(route.rsplit("/", 1)[-1])
+            if prediction is None:
+                self.send_json({"ok": False, "error": "prediction not found"}, HTTPStatus.NOT_FOUND)
+            else:
+                self.send_json({"prediction_id": prediction.prediction_id, "sample_id": prediction.sample_id, "task": prediction.task, "label_json": prediction.label_json, "model_name": prediction.model_name, "model_version": prediction.model_version, "confidence": prediction.confidence})
+            return
         if route == "/video":
             self.serve_video(send_body=True)
             return
@@ -1455,7 +1463,39 @@ class VideoCsvHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != "/api/save":
+        route = urlparse(self.path).path
+        if route.startswith("/api/predictions/") and route.rsplit("/", 1)[-1] in ("accept", "reject"):
+            if self.state.service is None:
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            prediction_id, action = route[len("/api/predictions/"):].rsplit("/", 1)
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                if not isinstance(payload, dict):
+                    raise ValueError("request body must be an object")
+                actor = payload.get("actor", "human")
+                expected = payload.get("expected_revision")
+                if not isinstance(actor, str) or not actor.strip():
+                    raise ValueError("actor is required")
+                if expected is not None and (isinstance(expected, bool) or not isinstance(expected, int) or expected < 0):
+                    raise ValueError("expected_revision must be a non-negative integer")
+                if action == "accept":
+                    result = self.state.service.accept_prediction(prediction_id, actor.strip(), expected)
+                    self.state._refresh_db_rows()
+                    self.send_json({"ok": True, "sample_id": result.sample_id, "revision": result.revision, "review_status": result.review_status})
+                else:
+                    self.state.service.reject_prediction(prediction_id, actor.strip())
+                    self.state._refresh_db_rows()
+                    self.send_json({"ok": True})
+            except ConflictError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.CONFLICT)
+            except KeyError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.NOT_FOUND)
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        if route != "/api/save":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
 

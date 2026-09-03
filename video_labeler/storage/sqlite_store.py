@@ -429,13 +429,26 @@ class SQLiteStore:
             rows = self._connection.execute("SELECT prediction_id FROM model_predictions WHERE sample_id = ? ORDER BY prediction_id", (sample_id,)).fetchall()
         return [prediction for row in rows if (prediction := self.get_prediction(row["prediction_id"])) is not None]
 
-    def decide_prediction(self, prediction_id: str, status: str, annotator: str, decided_at: str) -> None:
+    def decide_prediction(self, prediction_id: str, status: str, annotator: str, decided_at: str,
+                          expected_revision: int | None = None, record_revision: bool = False) -> int | None:
         if status not in ("accepted", "rejected"):
             raise ValueError("status must be accepted or rejected")
         with self.transaction() as connection:
-            changed = connection.execute("UPDATE model_predictions SET review_status=?, annotator=?, decided_at=? WHERE prediction_id=? AND review_status='draft'", (status, annotator, decided_at, prediction_id)).rowcount
-            if not changed:
+            row = connection.execute("SELECT sample_id FROM model_predictions WHERE prediction_id=? AND review_status='draft'", (prediction_id,)).fetchone()
+            if row is None:
                 raise KeyError(f"unknown or already decided prediction: {prediction_id}")
+            if not record_revision:
+                connection.execute("UPDATE model_predictions SET review_status=?, annotator=?, decided_at=? WHERE prediction_id=?", (status, annotator, decided_at, prediction_id))
+                return None
+            sample_id = str(row["sample_id"])
+            current = self._check_revision(connection, sample_id, expected_revision)
+            before = canonical_snapshot(self._events_from_connection(connection, sample_id), self._persons_from_connection(connection, sample_id))
+            connection.execute("UPDATE model_predictions SET review_status=?, annotator=?, decided_at=? WHERE prediction_id=?", (status, annotator, decided_at, prediction_id))
+            new_revision = current + 1
+            connection.execute("UPDATE samples SET revision=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE sample_id=?", (new_revision, sample_id))
+            summary = f"reject prediction {prediction_id}" if status == "rejected" else f"accept prediction {prediction_id}"
+            connection.execute("INSERT INTO annotation_revisions(sample_id, revision, actor, summary, before_json, after_json, app_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))", (sample_id, new_revision, annotator, summary, before, before, "video-labeler/1"))
+            return new_revision
 
     def add_revision(self, sample_id: str, revision: int, actor: str, summary: str, before_json: str | None, after_json: str | None, app_version: str = "video-labeler/1") -> None:
         with self.transaction() as connection:

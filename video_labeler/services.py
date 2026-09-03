@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .domain import Event, Person, Prediction
+from .domain import Event, Person, Prediction, utc_now
 from .providers import AnnotationProvider
 from .serialization import snapshot_payload
 from .storage.csv_adapter import export_csv
@@ -155,6 +155,41 @@ class AnnotationService:
 
     def get_prediction(self, prediction_id: str) -> Prediction | None:
         return self.store.get_prediction(prediction_id)
+
+    def list_predictions(self, sample_id: str) -> list[Prediction]:
+        if self.store.get_sample(sample_id) is None:
+            raise KeyError(sample_id)
+        return self.store.list_predictions(sample_id)
+
+    def accept_prediction(self, prediction_id: str, actor: str, expected_revision: int | None = None) -> SaveResult:
+        record = self.store.prediction_record(prediction_id)
+        if record is None:
+            raise KeyError(prediction_id)
+        prediction, status, _, _ = record
+        if status != "draft":
+            raise KeyError(f"unknown or already decided prediction: {prediction_id}")
+        try:
+            label = json.loads(prediction.label_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("prediction label_json must be valid JSON") from exc
+        if not isinstance(label, dict):
+            raise ValueError("prediction label must be an object")
+        common = {"source": "model", "confidence": prediction.confidence, "review_status": "accepted", "annotator": actor}
+        if prediction.task == "event":
+            event = self._event({**label, **common}, prediction.sample_id)
+            result_revision = self.store.replace_annotations(prediction.sample_id, events=[event], expected_revision=expected_revision, actor=actor, summary=f"accept prediction {prediction_id}")
+            result = SaveResult(prediction.sample_id, result_revision, "reviewed")
+        elif prediction.task == "person":
+            person = self._person({**label, **common}, prediction.sample_id)
+            result_revision = self.store.replace_annotations(prediction.sample_id, people=[person], expected_revision=expected_revision, actor=actor, summary=f"accept prediction {prediction_id}")
+            result = SaveResult(prediction.sample_id, result_revision, "draft")
+        else:
+            raise ValueError(f"unsupported prediction task: {prediction.task}")
+        self.store.decide_prediction(prediction_id, "accepted", actor, utc_now())
+        return result
+
+    def reject_prediction(self, prediction_id: str, actor: str) -> None:
+        self.store.decide_prediction(prediction_id, "rejected", actor, utc_now(), record_revision=True)
 
 
 __all__ = ["AnnotationService", "RowPayload", "SaveResult"]
