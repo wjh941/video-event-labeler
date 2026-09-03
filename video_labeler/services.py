@@ -1,0 +1,119 @@
+"""Application services shared by the event and person annotation adapters."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+from .domain import Event, Person
+from .storage.csv_adapter import export_csv
+from .storage.sqlite_store import SQLiteStore
+
+
+@dataclass(frozen=True)
+class SaveResult:
+    sample_id: str
+    revision: int
+    review_status: str = "draft"
+    behavior_class: str = ""
+
+
+@dataclass(frozen=True)
+class RowPayload:
+    sample_id: str
+    video_url: str
+    behaviors: tuple[dict[str, Any], ...]
+    person_identity_attributes: tuple[dict[str, Any], ...]
+    person_count: int
+    csv_revision: str
+    revision: int
+    status: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "sample_id": self.sample_id,
+            "video_url": self.video_url,
+            "behaviors": list(self.behaviors),
+            "events": list(self.behaviors),
+            "person_identity_attributes": list(self.person_identity_attributes),
+            "person_count": self.person_count,
+            "csv_revision": self.csv_revision,
+            "revision": self.revision,
+            "status": self.status,
+        }
+
+
+class AnnotationService:
+    def __init__(self, store: SQLiteStore, video_root: Path) -> None:
+        self.store = store
+        self.video_root = Path(video_root).resolve()
+
+    @staticmethod
+    def _event(value: Event | Mapping[str, Any], sample_id: str) -> Event:
+        if isinstance(value, Event):
+            if value.sample_id != sample_id:
+                raise ValueError("event belongs to another sample")
+            return value
+        return Event(sample_id=sample_id, event_type=str(value.get("event_type", "")).strip(),
+                     start_time_ms=value.get("start_time_ms", value.get("start_time")),
+                     end_time_ms=value.get("end_time_ms", value.get("end_time")),
+                     source=str(value.get("source") or "human"), confidence=value.get("confidence"),
+                     review_status=str(value.get("review_status") or "draft"),
+                     annotator=value.get("annotator"), revision=int(value.get("revision") or 0),
+                     event_id=str(value.get("event_id") or ""))
+
+    @staticmethod
+    def _person(value: Person | Mapping[str, Any], sample_id: str) -> Person:
+        if isinstance(value, Person):
+            if value.sample_id != sample_id:
+                raise ValueError("person belongs to another sample")
+            return value
+        return Person(sample_id=sample_id, person_id=str(value.get("person_id") or "").strip(),
+                      age_group=str(value.get("age_group") or "unknown"),
+                      face_familiarity=str(value.get("face_familiarity") or "unknown"),
+                      body_reid_familiarity=str(value.get("body_reid_familiarity") or value.get("body_familiarity") or "unknown"),
+                      track_id=value.get("track_id"), source=str(value.get("source") or "human"),
+                      confidence=value.get("confidence"), review_status=str(value.get("review_status") or "draft"),
+                      annotator=value.get("annotator"), revision=int(value.get("revision") or 0),
+                      person_record_id=str(value.get("person_record_id") or ""))
+
+    def _row(self, sample) -> RowPayload:
+        events = self.store.get_events(sample.sample_id)
+        people = self.store.get_persons(sample.sample_id)
+        event_payload = tuple({"event_type": e.event_type, "start_time_ms": e.start_time_ms,
+                               "end_time_ms": e.end_time_ms, "source": e.source,
+                               "confidence": e.confidence, "review_status": e.review_status} for e in events)
+        person_payload = tuple({"person_id": p.person_id, "age_group": p.age_group,
+                                "face_familiarity": p.face_familiarity,
+                                "body_reid_familiarity": p.body_reid_familiarity,
+                                **({"track_id": p.track_id} if p.track_id else {})} for p in people)
+        return RowPayload(sample.sample_id, f"/video/{sample.sample_id}", event_payload,
+                          person_payload, len(people), str(sample.revision), sample.revision, sample.status)
+
+    def list_rows(self, offset: int = 0, limit: int = 100, filters: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+        status = (filters or {}).get("status") if filters else None
+        return [self._row(s).as_dict() for s in self.store.list_samples(limit, offset, status=status)]
+
+    def get_row(self, sample_id: str) -> RowPayload:
+        sample = self.store.get_sample(sample_id)
+        if sample is None:
+            raise KeyError(sample_id)
+        return self._row(sample)
+
+    def save_events(self, sample_id: str, events: Iterable[Event | Mapping[str, Any]], expected_revision: int | None = None) -> SaveResult:
+        converted = [self._event(e, sample_id) for e in events]
+        revision = self.store.replace_events(sample_id, converted, expected_revision)
+        return SaveResult(sample_id, revision, "reviewed" if any(e.review_status == "accepted" for e in converted) else "draft")
+
+    def save_people(self, sample_id: str, people: Iterable[Person | Mapping[str, Any]], expected_revision: int | None = None) -> SaveResult:
+        converted = [self._person(p, sample_id) for p in people]
+        revision = self.store.replace_persons(sample_id, converted, expected_revision)
+        return SaveResult(sample_id, revision)
+
+    def export_csv(self, path: Path):
+        return export_csv(self.store, Path(path), self.video_root)
+
+
+__all__ = ["AnnotationService", "RowPayload", "SaveResult"]
