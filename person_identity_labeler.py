@@ -886,6 +886,7 @@ HTML_PAGE = r"""<!doctype html>
         <div class="nav-actions">
           <button id="previousButton" type="button">保存并上一段</button>
           <button id="nextButton" type="button">保存并下一段</button>
+          <span id="quality-warning" aria-live="polite"></span>
           <button id="saveButton" class="primary" type="button">保存到 CSV</button>
         </div>
       </div>
@@ -909,6 +910,8 @@ HTML_PAGE = r"""<!doctype html>
     let behaviors = [];
     let people = [];
     let saving = false;
+    let dirty = false;
+    const RESUME_STORAGE_KEY = "video-labeler:last-sample";
     let segmentTimer = null;
     let csvRevision = "";
     const BEHAVIOR_OPTIONS = [
@@ -1170,6 +1173,7 @@ HTML_PAGE = r"""<!doctype html>
       video.pause();
       selectedIndex = Number(index);
       const row = appState.rows[selectedIndex];
+      localStorage.setItem(RESUME_STORAGE_KEY, row.sample_id || "");
       if (!row) return;
 
       sampleId.value = row.sample_id || "";
@@ -1215,6 +1219,9 @@ HTML_PAGE = r"""<!doctype html>
       document.getElementById("sourceMeta").textContent =
         `${appState.video_root}  |  ${appState.csv_path}  |  ${appState.row_count} 条记录`;
       renderRows();
+      const resumeId = localStorage.getItem(RESUME_STORAGE_KEY);
+      const resumeIndex = resumeId ? appState.rows.findIndex((row) => row.sample_id === resumeId) : -1;
+      if (resumeIndex >= 0) { selectedIndex = resumeIndex; renderRows(); }
     }
 
     video.addEventListener("timeupdate", () => {
@@ -1281,6 +1288,7 @@ HTML_PAGE = r"""<!doctype html>
     async function saveCurrent(moveBy = 0) {
       if (saving) return;
       saving = true;
+      document.getElementById("saveButton").disabled = true;
       setStatus("正在保存...");
       const payload = {
         row_index: selectedIndex,
@@ -1298,6 +1306,7 @@ HTML_PAGE = r"""<!doctype html>
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "保存失败");
         csvRevision = result.csv_revision || csvRevision;
+        dirty = false;
         appState.rows[selectedIndex] = result.row;
         if (moveBy !== 0) {
           const nextIndex = selectedIndex + moveBy;
@@ -1318,6 +1327,7 @@ HTML_PAGE = r"""<!doctype html>
         setStatus(error.message || String(error), "error");
       } finally {
         saving = false;
+        document.getElementById("saveButton").disabled = false;
       }
     }
 
