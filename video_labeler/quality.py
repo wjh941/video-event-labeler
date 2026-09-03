@@ -93,7 +93,7 @@ def validate_dataset(store: SQLiteStore, mode: str = "draft") -> QualityReport:
                 continue
             if event.end_time_ms <= event.start_time_ms:
                 errors.append(_issue(sid, "events", "event_non_positive_duration", f"event {event.event_id} has non-positive duration"))
-            if duration_ms is not None and event.end_time_ms > duration_ms:
+            if event.start_time_ms < 0 or event.end_time_ms < 0 or (duration_ms is not None and event.end_time_ms > duration_ms):
                 errors.append(_issue(sid, "events", "event_out_of_bounds", f"event {event.event_id} ends at {event.end_time_ms}ms, media is {duration_ms}ms"))
             complete_events.append((event.start_time_ms, event.end_time_ms, event.event_id))
         for index, (start, end, event_id) in enumerate(sorted(complete_events)):
