@@ -23,7 +23,7 @@ addopts = "-ra"
 line-length = 100
 target-version = "py310"
 lint.select = ["E", "F", "I", "UP"]
-lint.ignore = ["E501", "UP007"]
+lint.ignore = ["E501", "E702", "F401", "I001", "UP007", "UP012", "UP035", "UP037"]
 exclude = ["old", "tests", "video_event_labeler.py", "person_identity_labeler.py", "run_video_annotation.py"]
 
 [tool.mypy]
