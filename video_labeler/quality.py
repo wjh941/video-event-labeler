@@ -8,7 +8,7 @@ import os
 import tempfile
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -255,7 +255,7 @@ def export_jsonl(store: SQLiteStore, path: Path, manifest_path: Path | None = No
     meta_path = path.with_name(path.name + ".meta.json")
     with FileLock(path.with_name(path.name + ".lock")):
         if path.exists():
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
             backup_path = path.with_name(f"{path.stem}.before_export_{timestamp}{path.suffix}")
             backup_path.write_bytes(path.read_bytes())
         _atomic_jsonl(path, records)

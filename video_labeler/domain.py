@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 AGE_GROUPS = ("child", "adult", "elderly", "unknown")
@@ -17,7 +17,7 @@ REVIEW_STATUSES = ("draft", "accepted", "rejected")
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _required(value: str, name: str) -> None:

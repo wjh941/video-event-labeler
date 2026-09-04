@@ -7,7 +7,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -46,7 +46,7 @@ class SQLiteStore:
         lock_path = self.path.with_name(self.path.name + ".lock")
         with FileLock(lock_path):
             if self.path.exists() and self.path.stat().st_size > 0:
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
                 backup = self.path.with_name(f"{self.path.name}.pre-migration-{timestamp}.db")
                 backup_connection = sqlite3.connect(str(backup))
                 try:
@@ -406,9 +406,9 @@ class SQLiteStore:
         if not evidence_ids:
             return
         with self._lock:
+            placeholders = ",".join("?" for _ in evidence_ids)
             rows = self._connection.execute(
-                "SELECT evidence_id, sample_id FROM evidence WHERE evidence_id IN (%s)"
-                % ",".join("?" for _ in evidence_ids),
+                f"SELECT evidence_id, sample_id FROM evidence WHERE evidence_id IN ({placeholders})",
                 tuple(evidence_ids),
             ).fetchall()
         found = {row["evidence_id"]: row["sample_id"] for row in rows}

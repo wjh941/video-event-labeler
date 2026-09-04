@@ -14,7 +14,7 @@ import os
 import shutil
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
@@ -294,7 +294,7 @@ def _atomic_write(path: Path, writer, *, bom: bool = False) -> None:
 def _backup(path: Path) -> Path | None:
     if not path.exists():
         return None
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     target = path.with_name(f"{path.stem}.before_export_{timestamp}{path.suffix}")
     shutil.copy2(path, target)
     return target
