@@ -1172,6 +1172,14 @@ async function resumeOpenRow(index){
     }
   }
   const result=await originalOpenRow.call(this,target);
+  const draftState=restoreDraft();
+  if(draftState&&draftState.payload&&rows[current]&&draftState.sample_id===rows[current].sample_id){
+    if(mode==="simple"){rows[current].start_time=draftState.payload.start_time;rows[current].end_time=draftState.payload.end_time}
+    else rows[current].events=draftState.payload.events||rows[current].events;
+    renderEvents(rows[current]);
+    dirty=true;
+    setStatus("宸叉仮澶嶆湭淇濆瓨鑽夌");
+  }
   writeResumeState();
   return result;
 }
