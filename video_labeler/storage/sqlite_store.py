@@ -460,16 +460,18 @@ class SQLiteStore:
         clauses: list[str] = []
         parameters: list[object] = []
         if status is not None:
-            clauses.append("review_status = ?")
+            clauses.append("p.review_status = ?")
             parameters.append(status)
         if task is not None:
-            clauses.append("task = ?")
+            clauses.append("p.task = ?")
             parameters.append(task)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         parameters.extend((limit, offset))
         with self._lock:
             return self._connection.execute(
-                f"SELECT * FROM model_predictions{where} ORDER BY prediction_id LIMIT ? OFFSET ?",
+                f"SELECT p.*, s.revision AS sample_revision FROM model_predictions AS p "
+                f"JOIN samples AS s ON s.sample_id = p.sample_id{where} "
+                "ORDER BY p.prediction_id LIMIT ? OFFSET ?",
                 tuple(parameters),
             ).fetchall()
 

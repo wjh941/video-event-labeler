@@ -50,6 +50,7 @@ def test_service_lists_prediction_records_with_filters(tmp_path, store):
     assert [item["prediction_id"] for item in records] == ["p1", "p3"]
     assert records[0]["label"] == {"value": "p1"}
     assert records[0]["review_status"] == "draft"
+    assert records[0]["sample_revision"] == 0
 
 
 def test_service_quality_snapshot_has_stats_and_report(tmp_path, store):

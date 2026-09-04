@@ -31,7 +31,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
@@ -450,6 +450,44 @@ class AppState:
 
     def state_payload(self, offset: int | None = None, limit: int | None = None, search: str = "", status: str = "") -> Dict[str, Any]:
         with self.lock:
+            if status == "pending":
+                status = "draft"
+            if status and status not in ("draft", "reviewed", "rejected"):
+                raise ValueError("status must be draft, reviewed, rejected, pending, or omitted")
+            paged = offset is not None or limit is not None or bool(search) or bool(status)
+            if self.service is not None and paged and not search:
+                actual_offset = 0 if offset is None else offset
+                actual_limit = 100 if limit is None else limit
+                records = self.service.list_rows(actual_offset, actual_limit, {"status": status} if status else None)
+                total = self.service.count_rows(status or None)
+                rows: list[Dict[str, Any]] = []
+                for index, record in enumerate(records, start=actual_offset):
+                    relative_path = str(record.get("relative_path") or "")
+                    sample_id = str(record.get("sample_id") or "")
+                    rows.append({
+                        "row_index": index,
+                        "sample_id": sample_id,
+                        "video_path": str((self.video_root / relative_path).resolve()),
+                        "video_name": Path(relative_path).name,
+                        "video_url": f"/video?sample_id={quote(sample_id, safe='')}",
+                        "behavior_id": "",
+                        "person_count": int(record.get("person_count", 0)),
+                        "revision": int(record.get("revision", 0)),
+                        "person_identity_attributes": list(record.get("person_identity_attributes", [])),
+                        "events": list(record.get("events", [])),
+                        "behaviors": list(record.get("behaviors", [])),
+                        "review_status": "reviewed" if record.get("status") == "reviewed" else str(record.get("status") or "draft"),
+                    })
+                return {
+                    "video_root": str(self.video_root),
+                    "csv_path": str(self.csv_path) if self.csv_path else "",
+                    "csv_revision": self.db_revision(),
+                    "row_count": total,
+                    "rows": rows,
+                    "offset": actual_offset,
+                    "limit": actual_limit,
+                    "has_more": actual_offset + len(rows) < total,
+                }
             if self.service is not None:
                 self._refresh_db_rows()
             rows = [self.row_payload(i) for i in range(len(self.rows))]
@@ -459,7 +497,6 @@ class AppState:
             if status:
                 rows = [row for row in rows if str(row.get("review_status", "")).casefold() == status.casefold()]
             total = len(rows)
-            paged = offset is not None or limit is not None or bool(search) or bool(status)
             if paged:
                 actual_offset = 0 if offset is None else offset
                 actual_limit = 100 if limit is None else limit
@@ -484,23 +521,28 @@ class AppState:
         if self.service is not None and self.store is not None:
             with self.lock:
                 self._refresh_db_rows()
-                if not 0 <= row_index < len(self.rows):
-                    raise ValueError("row_index out of range")
-                sample_id = str(payload.get("sample_id") or self.rows[row_index].get("sample_id") or "").strip()
+                sample_id = str(payload.get("sample_id") or "").strip()
+                if not sample_id and 0 <= row_index < len(self.rows):
+                    sample_id = str(self.rows[row_index].get("sample_id") or "").strip()
                 sample = self.store.get_sample(sample_id)
                 if sample is None:
                     raise ValueError("sample_id not found")
                 expected = payload.get("csv_revision")
                 if expected not in (None, "") and expected != self.db_revision():
                     raise CsvConflictError("SQLite dataset was modified externally; reload before saving")
-                raw_people = payload.get("people", parse_person_attributes(self.rows[row_index].get("person_identity_attributes", "")))
+                fallback_people = parse_person_attributes(self.rows[row_index].get("person_identity_attributes", "")) if 0 <= row_index < len(self.rows) else [
+                    {"person_id": person.person_id, "age_group": person.age_group,
+                     "face_familiarity": person.face_familiarity,
+                     "body_reid_familiarity": person.body_reid_familiarity}
+                    for person in self.store.get_persons(sample_id)
+                ]
+                raw_people = payload.get("people", fallback_people)
                 if not isinstance(raw_people, list):
                     raise ValueError("people must be an array")
-                result = self.service.save_people(sample_id, raw_people, expected_revision=sample.revision)
+                self.service.save_people(sample_id, raw_people, expected_revision=sample.revision)
                 self._refresh_db_rows()
-                return {"sample_id": sample_id, "person_count": len(raw_people),
-                        "person_identity_attributes": self.rows[row_index]["person_identity_attributes"],
-                        "csv_revision": self.db_revision()}
+                saved_index = next(index for index, row in enumerate(self.rows) if row.get("sample_id") == sample_id)
+                return self.row_payload(saved_index)
 
         if not 0 <= row_index < len(self.rows):
             raise ValueError("row_index 超出 CSV 行范围")
@@ -1465,7 +1507,34 @@ HTML_PAGE = r"""<!doctype html>
       window.__loadState=loadPage;
       const originalSaveCurrent=saveCurrent;saveCurrent=async function(moveBy=0){const result=await originalSaveCurrent(moveBy);await Promise.all([loadQuality(),loadPredictions()]);return result};
       $("rowPageSize").onchange=()=>{limit=Number($("rowPageSize").value);offset=0;loadPage()};$("rowPrev").onclick=()=>{offset=Math.max(0,offset-limit);loadPage()};$("rowNext").onclick=()=>{if(offset+limit<total){offset+=limit;loadPage()}};$("rowSearch").oninput=()=>{clearTimeout(window.__rowSearchTimer);window.__rowSearchTimer=setTimeout(()=>{offset=0;loadPage()},250)};$("rowStatus").onchange=()=>{offset=0;loadPage()};$("qualityMode").onchange=loadQuality;$("qualityRefresh").onclick=loadQuality;loadPage();
-    })();
+})();
+  </script>
+  <script>
+  (function(){
+    const nativeFetch=window.fetch.bind(window),predictionSamples=new Map();
+    let activeController=null;
+    function pageUrl(input){return new URL(typeof input==="string"?input:input.url,window.location.href)}
+    function navigateToSample(sampleId){if(!sampleId)return;const input=document.getElementById("rowSearch");if(input){input.value=sampleId;input.dispatchEvent(new Event("input",{bubbles:true}))}}
+    window.fetch=async function(input,options){
+      const requestOptions={...(options||{})},url=pageUrl(input),isPage=url.pathname==="/api/state";
+      const isPredictionList=url.pathname==="/api/predictions"&&(!requestOptions.method||requestOptions.method.toUpperCase()==="GET");
+      const predictionMatch=url.pathname.match(/^\/api\/predictions\/([^/]+)\/(accept|reject)$/);
+      if(isPage){if(activeController)activeController.abort();activeController=new AbortController();requestOptions.signal=activeController.signal}
+      let sampleId="";
+      if(predictionMatch){sampleId=predictionSamples.get(decodeURIComponent(predictionMatch[1]))||"";if(sampleId&&typeof requestOptions.body==="string"){try{const body=JSON.parse(requestOptions.body),revision=predictionSamples.get(`${decodeURIComponent(predictionMatch[1])}:revision`);if(Number.isInteger(revision))body.expected_revision=revision;requestOptions.body=JSON.stringify(body)}catch{}}}
+      const response=await nativeFetch(url.toString(),requestOptions);
+      if(isPage){response.clone().json().then(body=>{window.__personPageOffset=Number(body.offset||0);const meta=document.getElementById("sourceMeta");if(meta)meta.textContent=`${body.video_root||""}  |  ${body.csv_path||""}  |  ${body.row_count||0} 条记录`}).catch(()=>{})}
+      if(isPredictionList){response.clone().json().then(body=>{for(const item of body.items||[]){predictionSamples.set(item.prediction_id,item.sample_id);if(Number.isInteger(item.sample_revision))predictionSamples.set(`${item.prediction_id}:revision`,item.sample_revision)}}).catch(()=>{})}
+      if(predictionMatch&&response.ok&&sampleId)navigateToSample(sampleId);
+      return response;
+    };
+    const status=document.getElementById("rowStatus");
+    if(status&&!status.querySelector('option[value="pending"]')){const pending=document.createElement("option");pending.value="pending";pending.textContent="待审核";status.insertBefore(pending,status.options[1]||null)}
+    const rowSelect=document.getElementById("rowSelect");
+    if(rowSelect){const renumber=()=>{const base=Number(window.__personPageOffset||0);[...rowSelect.options].forEach((option,index)=>{const sample=option.textContent.replace(/^\d+\.\s*/,"");option.textContent=`${base+index+1}. ${sample}`});const state=typeof appState!=="undefined"?appState:null;const meta=document.getElementById("sourceMeta");if(meta&&state)meta.textContent=`${state.video_root||""}  |  ${state.csv_path||""}  |  ${state.row_count||0} 条记录`};new MutationObserver(renumber).observe(rowSelect,{childList:true});renumber()}
+    const issues=document.getElementById("qualityIssues");
+    if(issues)issues.addEventListener("click",event=>{const item=event.target.closest("div");if(!item||item.parentElement!==issues)return;const sampleId=(item.dataset.sampleId||item.textContent.trim().split(/\s+/)[0]);if(sampleId)navigateToSample(sampleId)});
+  })();
   </script>
 </body>
 </html>
@@ -1610,15 +1679,23 @@ class VideoCsvHandler(BaseHTTPRequestHandler):
 
     def serve_video(self, send_body: bool) -> None:
         query = parse_qs(urlparse(self.path).query)
-        try:
-            row_index = int(query.get("row", ["0"])[0])
-        except (TypeError, ValueError):
-            self.send_error(HTTPStatus.BAD_REQUEST, "invalid video row")
-            return
-        if not 0 <= row_index < len(self.state.rows):
-            self.send_error(HTTPStatus.NOT_FOUND, "CSV row not found")
-            return
-        video_path = self.state.video_path_for_row(row_index)
+        sample_id = query.get("sample_id", [""])[0].strip()
+        if sample_id and self.state.store is not None:
+            sample = self.state.store.get_sample(sample_id)
+            if sample is None:
+                self.send_error(HTTPStatus.NOT_FOUND, "sample not found")
+                return
+            video_path = (self.state.video_root / sample.relative_path).resolve()
+        else:
+            try:
+                row_index = int(query.get("row", ["0"])[0])
+            except (TypeError, ValueError):
+                self.send_error(HTTPStatus.BAD_REQUEST, "invalid video row")
+                return
+            if not 0 <= row_index < len(self.state.rows):
+                self.send_error(HTTPStatus.NOT_FOUND, "CSV row not found")
+                return
+            video_path = self.state.video_path_for_row(row_index)
         try:
             video_path.relative_to(self.state.video_root)
         except ValueError:

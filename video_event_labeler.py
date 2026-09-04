@@ -1231,6 +1231,46 @@ buildPayload=buildPayloadWithRevision;
   $("page-size").onchange=()=>{pageLimit=Number($("page-size").value);pageOffset=0;loadPage()};$("page-prev").onclick=()=>{pageOffset=Math.max(0,pageOffset-pageLimit);loadPage()};$("page-next").onclick=()=>{if(pageOffset+pageLimit<pageTotal){pageOffset+=pageLimit;loadPage()}};$("row-search").oninput=()=>{clearTimeout(window.__rowSearchTimer);window.__rowSearchTimer=setTimeout(()=>{pageOffset=0;loadPage()},250)};$("row-status").onchange=()=>{pageOffset=0;loadPage()};$("filter").addEventListener("change",()=>{pageOffset=0;loadPage()});$("quality-mode").onchange=loadQuality;$("quality-refresh").onclick=loadQuality;
 })();
 </script>
+<script>
+(function(){
+  const nativeFetch=window.fetch.bind(window);
+  const predictionSamples=new Map();
+  let activeController=null;
+  function pageUrl(input){return new URL(typeof input==="string"?input:input.url,window.location.href)}
+  function navigateToSample(sampleId){
+    if(!sampleId)return;
+    const input=document.getElementById("row-search");
+    if(input){input.value=sampleId;input.dispatchEvent(new Event("input",{bubbles:true}))}
+  }
+  window.fetch=async function(input,options){
+    const requestOptions={...(options||{})};
+    const url=pageUrl(input);
+    const isPage=url.pathname==="/api/videos";
+    const isPredictionList=url.pathname==="/api/predictions"&&(!requestOptions.method||requestOptions.method.toUpperCase()==="GET");
+    const predictionMatch=url.pathname.match(/^\/api\/predictions\/([^/]+)\/(accept|reject)$/);
+    if(isPage){
+      const filter=document.getElementById("filter")?.value;
+      if((filter==="needs-time"||filter==="ready")&&!url.searchParams.has("state"))url.searchParams.set("state",filter);
+      if((filter==="pending"||filter==="reviewed")&&!url.searchParams.has("status")&&!document.getElementById("row-status")?.value)url.searchParams.set("status",filter);
+      if(activeController)activeController.abort();
+      activeController=new AbortController();requestOptions.signal=activeController.signal;
+    }
+    let sampleId="";
+    if(predictionMatch){
+      sampleId=predictionSamples.get(decodeURIComponent(predictionMatch[1]))||"";
+      if(sampleId&&typeof requestOptions.body==="string"){
+        try{const body=JSON.parse(requestOptions.body);const revision=predictionSamples.get(`${decodeURIComponent(predictionMatch[1])}:revision`);if(Number.isInteger(revision))body.expected_revision=revision;requestOptions.body=JSON.stringify(body)}catch{}
+      }
+    }
+    const response=await nativeFetch(url.toString(),requestOptions);
+    if(isPredictionList){response.clone().json().then(body=>{for(const item of body.items||[]){predictionSamples.set(item.prediction_id,item.sample_id);if(Number.isInteger(item.sample_revision))predictionSamples.set(`${item.prediction_id}:revision`,item.sample_revision)}}).catch(()=>{})}
+    if(predictionMatch&&response.ok&&sampleId){navigateToSample(sampleId)}
+    return response;
+  };
+  const issues=document.getElementById("quality-issues");
+  if(issues)issues.addEventListener("click",event=>{const item=event.target.closest("button");if(!item)return;const sampleId=item.textContent.trim().split(/\s+/)[0];if(sampleId)navigateToSample(sampleId)});
+})();
+</script>
 </body>
 </html>"""
 
@@ -1297,6 +1337,19 @@ def _parse_page(query: dict[str, list[str]]) -> tuple[int, int]:
     return integer("offset", 0), integer("limit", 100)
 
 
+def _event_row_state(row: dict[str, object], mode: str) -> str:
+    if mode == "simple":
+        start = row.get("start_time")
+        end = row.get("end_time")
+        return "ready" if start not in (None, "", "null") and end not in (None, "", "null") else "needs-time"
+    events = row.get("events") or []
+    if not isinstance(events, list) or not events:
+        return "needs-time"
+    if len(events) == 1 and isinstance(events[0], dict) and events[0].get("event_type") == "normal_scene":
+        return "ready"
+    return "ready" if all(isinstance(event, dict) and event.get("start_time_ms") is not None and event.get("end_time_ms") is not None for event in events) else "needs-time"
+
+
 class LabelerHTTPServer(ThreadingHTTPServer):
     def __init__(
         self,
@@ -1328,6 +1381,35 @@ class Handler(BaseHTTPRequestHandler):
         state = self.server.state
         if not state.ready:
             return []
+        query = query or {}
+        has_paging = any(key in query for key in ("offset", "limit", "q", "status", "state"))
+        # SQLite pages can be projected directly from the indexed rows. Search
+        # and needs-time/ready still need event payload inspection and use the
+        # compatibility snapshot path below.
+        if state.service is not None and has_paging and not query.get("q") and not query.get("state"):
+            offset, limit = _parse_page(query)
+            status = query.get("status", [""])[0].strip().casefold()
+            if status not in ("", "draft", "pending", "reviewed", "rejected"):
+                raise ValueError("status must be draft, reviewed, rejected, pending, or omitted")
+            db_status = "draft" if status in ("draft", "pending") else status or None
+            records = state.service.list_rows(offset, limit, {"status": db_status} if db_status else None)
+            total = state.service.count_rows(db_status)
+            output: list[dict[str, object]] = []
+            for record in records:
+                relative_path = str(record.get("relative_path") or "")
+                events = list(record.get("events", []))
+                output.append({
+                    "sample_id": record["sample_id"],
+                    "video_path": relative_path,
+                    "video_url": "/video/" + relative_path.replace("\\", "/"),
+                    "behavior_id": ",".join(str(event.get("event_type", "")) for event in events if isinstance(event, dict)),
+                    "events": events,
+                    "person_identity_attributes": json.dumps(record.get("person_identity_attributes", []), ensure_ascii=False, separators=(",", ":")),
+                    "person_count": str(record.get("person_count", 0)),
+                    "review_status": "reviewed" if record.get("status") == "reviewed" else "pending",
+                    "revision": str(record.get("revision", 0)),
+                })
+            return output, total, offset, limit
         state.csv_revision()
         rows, fieldnames = state.snapshot()
         mode = detect_manifest_mode(fieldnames)
@@ -1341,16 +1423,23 @@ class Handler(BaseHTTPRequestHandler):
                 item["review_status"] = row.get("review_status") or "pending"
             item["video_url"] = "/video/" + row.get("video_path", "").replace("\\", "/")
             output.append(item)
-        if not query or not any(key in query for key in ("offset", "limit", "q", "status")):
+        if not query or not has_paging:
             return output
         offset, limit = _parse_page(query)
         status = query.get("status", [""])[0].strip()
+        if status and status.casefold() not in {"draft", "pending", "reviewed", "rejected"}:
+            raise ValueError("status must be draft, reviewed, rejected, pending, or omitted")
         search = query.get("q", [""])[0].strip().casefold()
+        state_filter = query.get("state", [""])[0].strip().casefold()
+        if state_filter not in ("", "needs-time", "ready"):
+            raise ValueError("state must be needs-time, ready, or omitted")
         if status:
             wanted = {"draft", "pending"} if status.casefold() in {"draft", "pending"} else {status.casefold()}
             output = [item for item in output if str(item.get("review_status", "")).casefold() in wanted]
         if search:
             output = [item for item in output if search in str(item.get("sample_id", "")).casefold() or search in str(item.get("video_path", "")).casefold()]
+        if state_filter:
+            output = [item for item in output if _event_row_state(item, mode) == state_filter]
         total = len(output)
         return output[offset : offset + limit], total, offset, limit
 

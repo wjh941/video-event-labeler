@@ -128,6 +128,7 @@ def test_event_db_http_workflow(tmp_path: Path):
         assert status == 200
         assert predictions["total"] == 1
         assert predictions["items"][0]["prediction_id"] == "pred-1"
+        assert predictions["items"][0]["sample_revision"] == 0
 
         status, _, quality = _json_request(base, "GET", "/api/quality?mode=draft")
         assert status == 200
@@ -211,6 +212,9 @@ def test_person_db_http_save_conflict_range_and_prediction(tmp_path: Path):
         assert page["offset"] == 0
         assert page["limit"] == 1
         assert page["rows"][0]["sample_id"] == "s1"
+        status, _, pending_page = _json_request(base, "GET", "/api/state?status=pending&limit=1")
+        assert status == 200
+        assert pending_page["row_count"] == 1
 
         status, _, predictions = _json_request(base, "GET", "/api/predictions?status=draft")
         assert status == 200

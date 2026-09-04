@@ -32,6 +32,7 @@ class RowPayload:
     csv_revision: str
     revision: int
     status: str
+    relative_path: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +45,7 @@ class RowPayload:
             "csv_revision": self.csv_revision,
             "revision": self.revision,
             "status": self.status,
+            "relative_path": self.relative_path,
         }
 
 
@@ -95,11 +97,16 @@ class AnnotationService:
                                 "body_reid_familiarity": p.body_reid_familiarity,
                                 **({"track_id": p.track_id} if p.track_id else {})} for p in people)
         return RowPayload(sample.sample_id, f"/video/{sample.sample_id}", event_payload,
-                          person_payload, len(people), str(sample.revision), sample.revision, sample.status)
+                          person_payload, len(people), str(sample.revision), sample.revision, sample.status,
+                          sample.relative_path)
 
     def list_rows(self, offset: int = 0, limit: int = 100, filters: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         self._validate_page(offset, limit)
         status = (filters or {}).get("status") if filters else None
+        if status == "pending":
+            status = "draft"
+        if status not in (None, "draft", "reviewed", "rejected"):
+            raise ValueError("status must be draft, reviewed, rejected, or omitted")
         return [self._row(s).as_dict() for s in self.store.list_samples(limit, offset, status=status)]
 
     @classmethod
@@ -147,6 +154,7 @@ class AnnotationService:
                 "review_status": row["review_status"],
                 "annotator": row["annotator"],
                 "decided_at": row["decided_at"],
+                "sample_revision": row["sample_revision"],
             })
         return records
 

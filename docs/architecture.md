@@ -32,9 +32,13 @@ python -m video_labeler check-db --db dataset.db
 The recommended launcher is `python run_video_annotation.py --video-root VIDEOS`; it defaults the database to `VIDEOS/dataset.db`, imports a compatible CSV when present, and indexes supported videos with safe paths and optional ffprobe metadata.
 
 The event browser exposes `/api/status`, `/api/videos`, `/api/update`, and
-`/video/<relative-path>`. The person browser exposes `/api/state`, `/api/save`,
-and `/video?row=<index>`. Both adapters expose prediction reads and accept or
-reject actions under `/api/predictions/<prediction-id>`; stale revisions return
+`/video/<relative-path>`. `/api/videos` accepts `offset`, `limit`, `q`,
+`status`, and the event-completeness `state=needs-time|ready` filter. The person
+browser exposes `/api/state`, `/api/save`, and `/video?sample_id=<sample-id>`
+(the legacy row-index form remains supported for CSV mode). Both adapters expose
+prediction reads and accept or reject actions under `/api/predictions/<prediction-id>`;
+prediction records include the target sample revision so optimistic concurrency
+checks remain correct when reviewing a different page. Stale revisions return
 HTTP 409 and missing samples or media return HTTP 404.
 
 Stale revision writes fail with a conflict (HTTP 409 in adapters); callers must reload before retrying.
