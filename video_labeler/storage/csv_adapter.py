@@ -110,7 +110,8 @@ def _read_csv(path: Path) -> tuple[list[str], Iterator[dict[str, str]]]:
             dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
         except csv.Error:
             dialect = csv.excel
-        reader = csv.DictReader(sample.splitlines(), dialect=dialect)
+        handle.seek(0)
+        reader = csv.DictReader(handle, dialect=dialect)
         fields = [field.strip() for field in (reader.fieldnames or []) if field and field.strip()]
     if len(fields) != len(set(fields)):
         raise ValueError("CSV contains duplicate column names")

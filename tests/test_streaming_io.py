@@ -26,6 +26,25 @@ def test_import_reports_progress_incrementally(tmp_path, store):
     assert progress == [1, 2, 3]
 
 
+def test_import_preserves_quoted_multiline_csv_fields(tmp_path, store):
+    csv_path = tmp_path / "multiline.csv"
+    csv_path.write_text(
+        "sample_id,video_path,custom_note,events\n"
+        "s1,a.mp4,\"人工\n确认\",[]\n",
+        encoding="utf-8",
+    )
+
+    report = import_csv(csv_path, store, tmp_path)
+
+    assert report.created == 1
+    assert report.errors == []
+    sample = store.get_sample("s1")
+    assert sample is not None
+    row = store.connection().execute("SELECT extra_json FROM samples WHERE sample_id = ?", ("s1",)).fetchone()
+    assert row is not None
+    assert json.loads(row["extra_json"])["custom_note"].replace("\r\n", "\n") == "人工\n确认"
+
+
 def test_import_can_be_cancelled_between_rows(tmp_path, store):
     csv_path = tmp_path / "input.csv"
     csv_path.write_text(

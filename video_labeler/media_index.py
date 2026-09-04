@@ -68,4 +68,3 @@ def index_media(root: Path, store: SQLiteStore, ffprobe_path: Path | None = None
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
             report.errors.append(f"{relative_path}: {exc}")
     return report
-
