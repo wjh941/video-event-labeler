@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
-import shutil
 import threading
 import uuid
-from datetime import datetime, timezone
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -49,7 +48,12 @@ class SQLiteStore:
             if self.path.exists() and self.path.stat().st_size > 0:
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
                 backup = self.path.with_name(f"{self.path.name}.pre-migration-{timestamp}.db")
-                shutil.copy2(self.path, backup)
+                backup_connection = sqlite3.connect(str(backup))
+                try:
+                    self._connection.backup(backup_connection)
+                    backup_connection.commit()
+                finally:
+                    backup_connection.close()
             self._configure_connection()
             migrate_schema(self._connection)
 

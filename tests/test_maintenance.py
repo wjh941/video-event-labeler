@@ -82,3 +82,24 @@ def test_existing_database_gets_pre_migration_backup(tmp_path):
         assert check.execute("SELECT value FROM legacy").fetchone()[0] == "kept"
     finally:
         check.close()
+
+
+def test_pre_migration_backup_includes_wal_committed_data(tmp_path):
+    database = tmp_path / "dataset.db"
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("CREATE TABLE legacy(value TEXT)")
+    connection.execute("INSERT INTO legacy(value) VALUES ('wal-kept')")
+    connection.commit()
+
+    store = SQLiteStore(database)
+    store.close()
+    connection.close()
+
+    backups = list(tmp_path.glob("dataset.db.pre-migration-*.db"))
+    assert backups
+    check = sqlite3.connect(backups[0])
+    try:
+        assert check.execute("SELECT value FROM legacy").fetchone()[0] == "wal-kept"
+    finally:
+        check.close()
