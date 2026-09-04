@@ -227,6 +227,9 @@ def import_csv(path: Path, store: SQLiteStore, video_root: Path,
                 current = store.get_sample(sample_id) or _existing_by_path(store, relative_path)
                 if current and current.source_sha256 != source_hash and (current.source_sha256 or source_hash):
                     report.stale += 1
+                    processed += 1
+                    if progress is not None:
+                        progress(processed)
                     continue
                 canonical_id = current.sample_id if current else sample_id
                 try:
@@ -238,6 +241,9 @@ def import_csv(path: Path, store: SQLiteStore, video_root: Path,
                         sample = Sample(sample_id=canonical_id, dataset_id=dataset_id, relative_path=relative_path, source_sha256=source_hash)
                         store.replace_sample_bundle(sample, "{}", [], [])
                         report.created += 1
+                    processed += 1
+                    if progress is not None:
+                        progress(processed)
                     continue
                 extra = _extra_fields(fields, row)
                 status = row.get("status", "draft").strip() or "draft"

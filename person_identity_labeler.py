@@ -989,9 +989,10 @@ HTML_PAGE = r"""<!doctype html>
     const RESUME_STORAGE_KEY = "video-labeler:last-sample";
     const DRAFT_STORAGE_KEY = "video-labeler:person-draft";
     let draftTimer = null;
-    function saveDraft(){clearTimeout(draftTimer);draftTimer=setTimeout(()=>{try{localStorage.setItem(DRAFT_STORAGE_KEY,JSON.stringify({sample_id:appState?.rows?.[selectedIndex]?.sample_id,people}))}catch{}},250)}
+    function writeDraft(){try{localStorage.setItem(DRAFT_STORAGE_KEY,JSON.stringify({sample_id:appState?.rows?.[selectedIndex]?.sample_id,people,behaviors}))}catch{}}
+    function saveDraft(){clearTimeout(draftTimer);draftTimer=setTimeout(writeDraft,250)}
     function restoreDraft(){try{return JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY)||"null")}catch{return null}}
-    window.addEventListener("beforeunload",event=>{if(dirty){saveDraft();event.returnValue=""}});
+    window.addEventListener("beforeunload",event=>{if(dirty){writeDraft();event.preventDefault();event.returnValue=""}});
     let segmentTimer = null;
     let csvRevision = "";
     const BEHAVIOR_OPTIONS = [
@@ -1276,6 +1277,16 @@ HTML_PAGE = r"""<!doctype html>
         behaviors = [{ event_type: "", start_time_ms: null, end_time_ms: null }];
       }
       renderBehaviorList();
+      const draft = restoreDraft();
+      if (draft && draft.sample_id === row.sample_id) {
+        if (Array.isArray(draft.people)) people = draft.people;
+        if (Array.isArray(draft.behaviors)) behaviors = draft.behaviors;
+        personCount.value = String(people.length);
+        renderPeopleList();
+        renderBehaviorList();
+        dirty = true;
+        setStatus("宸叉仮澶嶆湭淇濆瓨鑽夌");
+      }
       setStatus(`第 ${selectedIndex + 1} / ${appState.row_count} 条`);
     }
 
@@ -1348,14 +1359,14 @@ HTML_PAGE = r"""<!doctype html>
       if (!control) return;
       const card = control.closest("[data-person-index]");
       const index = Number(card?.dataset.personIndex);
-      if (people[index]) people[index][control.dataset.personField] = control.value;
+      if (people[index]) { people[index][control.dataset.personField] = control.value; dirty = true; saveDraft(); }
     });
     personList.addEventListener("change", (event) => {
       const control = event.target.closest("[data-person-field]");
       if (!control) return;
       const card = control.closest("[data-person-index]");
       const index = Number(card?.dataset.personIndex);
-      if (people[index]) people[index][control.dataset.personField] = control.value;
+      if (people[index]) { people[index][control.dataset.personField] = control.value; dirty = true; saveDraft(); }
     });
     personList.addEventListener("click", (event) => {
       const button = event.target.closest("[data-remove-person]");
