@@ -47,17 +47,17 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(dataset_stats(store), ensure_ascii=False, sort_keys=True))
             return 0
         if args.command == "index-media":
-            report = index_media(args.video_root, store, ffprobe_path=args.ffprobe)
-            print(json.dumps({"scanned": report.scanned, "indexed": report.indexed, "skipped": report.skipped, "errors": report.errors}, ensure_ascii=False))
-            return 1 if report.errors else 0
+            index_report = index_media(args.video_root, store, ffprobe_path=args.ffprobe)
+            print(json.dumps({"scanned": index_report.scanned, "indexed": index_report.indexed, "skipped": index_report.skipped, "errors": index_report.errors}, ensure_ascii=False))
+            return 1 if index_report.errors else 0
         if args.command == "backup-db":
             output = backup_database(store, args.output)
             print(json.dumps({"path": str(output)}, ensure_ascii=False))
             return 0
         if args.command == "check-db":
-            report = check_database(store)
-            print(json.dumps({"ok": report.ok, "integrity_check": report.integrity_check, "schema_version": report.schema_version}, ensure_ascii=False))
-            return 0 if report.ok else 1
+            database_report = check_database(store)
+            print(json.dumps({"ok": database_report.ok, "integrity_check": database_report.integrity_check, "schema_version": database_report.schema_version}, ensure_ascii=False))
+            return 0 if database_report.ok else 1
         jsonl_report = export_jsonl(store, args.output, manifest_path=args.manifest, split_seed=args.split_seed)
         print(json.dumps({"path": str(jsonl_report.path), "sample_count": jsonl_report.sample_count}, ensure_ascii=False))
         return 0
