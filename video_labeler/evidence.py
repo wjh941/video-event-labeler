@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import os
 from pathlib import Path
 import re
 from urllib.parse import urlparse
@@ -24,9 +25,16 @@ class EvidenceService:
             raise ValueError("evidence ID already belongs to another sample")
         if self.media_root is not None and evidence.uri:
             parsed = urlparse(evidence.uri)
-            is_drive_path = re.match(r"^[A-Za-z]:[\\/]", evidence.uri) is not None
-            if parsed.scheme in ("", "file") or is_drive_path:
-                raw_path = Path(parsed.path if parsed.scheme == "file" else evidence.uri)
+            raw_uri = parsed.path if parsed.scheme == "file" else evidence.uri
+            is_windows_absolute = (
+                re.match(r"^[A-Za-z]:[\\/]", evidence.uri) is not None
+                or re.match(r"^/[A-Za-z]:[\\/]", raw_uri) is not None
+                or raw_uri.startswith("\\\\")
+            )
+            if is_windows_absolute and os.name != "nt":
+                raise ValueError("local evidence uri must stay within media_root")
+            if parsed.scheme in ("", "file") or is_windows_absolute:
+                raw_path = Path(raw_uri)
                 candidate = (raw_path if raw_path.is_absolute() else self.media_root / raw_path).resolve()
                 try:
                     candidate.relative_to(self.media_root)
