@@ -219,6 +219,21 @@ mypy video_labeler --exclude 'video_labeler/(storage|services|quality)'
 
 ## SQLite compatibility adapter
 
+## 大数据集审核、预测与质量面板
+
+两个标注页面都支持按页加载记录，默认每页 100 条，可切换为 50 或 200 条；搜索框按样本 ID/视频文件名筛选，审核状态筛选不会改变原始数据。SQLite 模式下页面还会显示模型预测审核面板和数据质量面板：预测可直接接受或拒绝，质量面板可切换草稿/严格模式并列出缺失时间、媒体失效、重复人员编号等问题。
+
+新增 HTTP 接口：
+
+```text
+GET /api/videos?offset=0&limit=100&q=clip&status=reviewed
+GET /api/state?offset=0&limit=100&q=clip&status=reviewed
+GET /api/predictions?status=draft&task=event&limit=100
+GET /api/quality?mode=draft
+```
+
+SQLite 仍是预测、质量统计和分页查询的权威数据源；CSV 模式继续支持原有标注和路径导入，但质量/预测面板需要使用组合启动器或带 `--db` 的启动方式。
+
 SQLite is the internal source of truth. Import existing manifests and export compatibility CSV files with these commands:
 
 ```powershell

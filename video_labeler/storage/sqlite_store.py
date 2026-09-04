@@ -214,6 +214,14 @@ class SQLiteStore:
                 rows = self._connection.execute("SELECT * FROM samples WHERE status = ? ORDER BY sample_id LIMIT ? OFFSET ?", (status, limit, offset)).fetchall()
             return [self._sample_from_row(row) for row in rows]
 
+    def count_samples(self, status: str | None = None) -> int:
+        with self._lock:
+            if status is None:
+                row = self._connection.execute("SELECT COUNT(*) FROM samples").fetchone()
+            else:
+                row = self._connection.execute("SELECT COUNT(*) FROM samples WHERE status = ?", (status,)).fetchone()
+            return int(row[0])
+
     def sample_revision(self, sample_id: str) -> int:
         with self._lock:
             row = self._connection.execute("SELECT revision FROM samples WHERE sample_id = ?", (sample_id,)).fetchone()
@@ -439,6 +447,47 @@ class SQLiteStore:
         with self._lock:
             rows = self._connection.execute("SELECT prediction_id FROM model_predictions WHERE sample_id = ? ORDER BY prediction_id", (sample_id,)).fetchall()
         return [prediction for row in rows if (prediction := self.get_prediction(row["prediction_id"])) is not None]
+
+    def list_prediction_records(
+        self,
+        limit: int,
+        offset: int,
+        status: str | None = None,
+        task: str | None = None,
+    ) -> list[sqlite3.Row]:
+        if limit < 0 or offset < 0:
+            raise ValueError("limit and offset must be non-negative")
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if status is not None:
+            clauses.append("review_status = ?")
+            parameters.append(status)
+        if task is not None:
+            clauses.append("task = ?")
+            parameters.append(task)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        parameters.extend((limit, offset))
+        with self._lock:
+            return self._connection.execute(
+                f"SELECT * FROM model_predictions{where} ORDER BY prediction_id LIMIT ? OFFSET ?",
+                tuple(parameters),
+            ).fetchall()
+
+    def count_predictions(self, status: str | None = None, task: str | None = None) -> int:
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if status is not None:
+            clauses.append("review_status = ?")
+            parameters.append(status)
+        if task is not None:
+            clauses.append("task = ?")
+            parameters.append(task)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            row = self._connection.execute(
+                f"SELECT COUNT(*) FROM model_predictions{where}", tuple(parameters)
+            ).fetchone()
+            return int(row[0])
 
     def decide_prediction(self, prediction_id: str, status: str, annotator: str, decided_at: str,
                           expected_revision: int | None = None, record_revision: bool = False) -> int | None:

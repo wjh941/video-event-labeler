@@ -119,6 +119,21 @@ def test_event_db_http_workflow(tmp_path: Path):
         status, _, _ = _json_request(base, "GET", "/api/predictions/missing")
         assert status == 404
 
+        status, headers, page = _json_request(base, "GET", "/api/videos?offset=0&limit=1")
+        assert status == 200
+        assert headers["X-Total-Count"] == "1"
+        assert page[0]["sample_id"] == "s1"
+
+        status, _, predictions = _json_request(base, "GET", "/api/predictions?status=draft&task=event")
+        assert status == 200
+        assert predictions["total"] == 1
+        assert predictions["items"][0]["prediction_id"] == "pred-1"
+
+        status, _, quality = _json_request(base, "GET", "/api/quality?mode=draft")
+        assert status == 200
+        assert quality["stats"]["sample_count"] == 1
+        assert quality["quality"]["checked_samples"] == 1
+
         update = {
             "sample_id": "s1",
             "csv_revision": revision,
@@ -190,6 +205,68 @@ def test_person_db_http_save_conflict_range_and_prediction(tmp_path: Path):
         assert prediction["task"] == "event"
         status, _, _ = _json_request(base, "GET", "/api/predictions/missing")
         assert status == 404
+
+        status, _, page = _json_request(base, "GET", "/api/state?offset=0&limit=1")
+        assert status == 200
+        assert page["offset"] == 0
+        assert page["limit"] == 1
+        assert page["rows"][0]["sample_id"] == "s1"
+
+        status, _, predictions = _json_request(base, "GET", "/api/predictions?status=draft")
+        assert status == 200
+        assert predictions["total"] == 1
+
+        status, _, quality = _json_request(base, "GET", "/api/quality?mode=strict")
+        assert status == 200
+        assert quality["quality"]["checked_samples"] == 1
+
+
+def test_db_http_rejects_invalid_pagination_queries(tmp_path: Path):
+    root = tmp_path / "videos"
+    root.mkdir()
+    database = tmp_path / "dataset.db"
+    _seed_database(root, database)
+
+    with _running_event_server(root, database) as (base, _):
+        status, _, _ = _json_request(base, "GET", "/api/videos?limit=0")
+        assert status == 400
+        status, _, _ = _json_request(base, "GET", "/api/quality?mode=invalid")
+        assert status == 400
+
+
+def test_person_pagination_save_uses_global_row_index(tmp_path: Path):
+    root = tmp_path / "videos"
+    root.mkdir()
+    (root / "a.mp4").write_bytes(b"a")
+    (root / "b.mp4").write_bytes(b"b")
+    database = tmp_path / "dataset.db"
+    store = SQLiteStore(database)
+    try:
+        store.upsert_sample(Sample(sample_id="s1", relative_path="a.mp4"))
+        store.upsert_sample(Sample(sample_id="s2", relative_path="b.mp4"))
+    finally:
+        store.close()
+
+    with _running_person_server(root, database) as (base, state):
+        status, _, page = _json_request(base, "GET", "/api/state?offset=1&limit=1")
+        assert status == 200
+        assert page["rows"][0]["sample_id"] == "s2"
+        revision = page["csv_revision"]
+        status, _, _ = _json_request(
+            base,
+            "POST",
+            "/api/save",
+            body={
+                "row_index": page["rows"][0]["row_index"],
+                "sample_id": "s2",
+                "csv_revision": revision,
+                "people": [{"person_id": "p2", "age_group": "adult", "face_familiarity": "stranger", "body_reid_familiarity": "unknown"}],
+            },
+        )
+        assert status == 200
+        assert state.store is not None
+        assert state.store.get_persons("s1") == []
+        assert state.store.get_persons("s2")[0].person_id == "p2"
 
 
 def test_person_db_http_rejects_video_path_escape(tmp_path: Path):

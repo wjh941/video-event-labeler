@@ -21,7 +21,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
@@ -1208,6 +1208,29 @@ const originalBuildPayload=buildPayload;
 function buildPayloadWithRevision(review){const payload=originalBuildPayload(review);if(csvRevision)payload.csv_revision=csvRevision;return payload}
 buildPayload=buildPayloadWithRevision;
 </script>
+<script>
+(function(){
+  const topbar=document.querySelector(".topbar"), side=document.querySelector(".scroll");
+  const tools=document.createElement("div");
+  tools.style.cssText="display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex:1 1 100%;order:6";
+  tools.innerHTML='<input id="row-search" placeholder="搜索文件名" aria-label="搜索文件名" style="flex:1;min-width:130px"><select id="row-status" aria-label="审核状态"><option value="">全部状态</option><option value="draft">草稿</option><option value="reviewed">已审核</option><option value="rejected">已拒绝</option></select><select id="page-size" aria-label="每页条数"><option value="50">50 / 页</option><option value="100" selected>100 / 页</option><option value="200">200 / 页</option></select><button id="page-prev" type="button">上一页</button><span id="page-indicator" aria-live="polite">第 1 页</span><button id="page-next" type="button">下一页</button>';
+  topbar.append(tools);
+  const panel=document.createElement("section");panel.className="section";panel.id="quality-panel";panel.innerHTML='<div class="section-title">数据质量</div><div id="quality-metrics" style="line-height:1.7;color:var(--muted)">加载中...</div><div style="display:flex;gap:6px;margin-top:6px"><select id="quality-mode" aria-label="质量模式"><option value="draft">草稿模式</option><option value="strict">严格模式</option></select><button id="quality-refresh" type="button">刷新质量</button></div><div id="quality-issues" style="margin-top:6px;max-height:130px;overflow:auto"></div>';
+  side.prepend(panel);
+  const predictions=document.createElement("section");predictions.className="section";predictions.id="prediction-panel";predictions.innerHTML='<div class="section-title">模型预测审核</div><div id="prediction-list" style="display:grid;gap:6px">加载中...</div>';
+  side.prepend(predictions);
+  let pageOffset=0,pageLimit=100,pageTotal=0;
+  function queryParams(){const params=new URLSearchParams({offset:String(pageOffset),limit:String(pageLimit)});const search=$("row-search").value.trim();const statusFilter=$("row-status").value;if(search)params.set("q",search);if(statusFilter)params.set("status",statusFilter);return params}
+  function renderPageIndicator(){const page=Math.floor(pageOffset/pageLimit)+1,total=Math.max(1,Math.ceil(pageTotal/pageLimit));$("page-indicator").textContent=`第 ${page} / ${total} 页`;$("page-prev").disabled=pageOffset<=0;$("page-next").disabled=pageOffset+pageLimit>=pageTotal}
+  async function loadQuality(){try{const mode=$("quality-mode").value;const data=await request(`/api/quality?mode=${encodeURIComponent(mode)}`);const stats=data.stats,report=data.quality;$("quality-metrics").textContent=`样本 ${stats.sample_count} | 已审核 ${stats.reviewed_samples} | 草稿 ${stats.draft_samples} | 完成率 ${(Number(stats.completion_rate||0)*100).toFixed(1)}% | 错误 ${report.errors.length} | 警告 ${report.warnings.length}`;const issues=[...report.errors,...report.warnings].slice(0,100);const box=$("quality-issues");box.replaceChildren();for(const issue of issues){const item=document.createElement("button");item.type="button";item.style.cssText="display:block;width:100%;text-align:left;margin:2px 0;font-size:11px";item.textContent=`${issue.sample_id||""} ${issue.code}: ${issue.message}`;item.onclick=()=>{const index=rows.findIndex(row=>row.sample_id===issue.sample_id);if(index>=0)openRow(index)};box.append(item)}}catch(error){$("quality-metrics").textContent=error.message;}}
+  async function loadPredictions(){try{const data=await request("/api/predictions?status=draft&limit=100");const box=$("prediction-list");box.replaceChildren();if(!data.items.length){box.textContent="暂无待审核预测";return}for(const prediction of data.items){const card=document.createElement("article");card.style.cssText="border:1px solid var(--line);padding:6px;border-radius:4px;font-size:11px";const title=document.createElement("div");title.textContent=`${prediction.sample_id} | ${prediction.task} | ${prediction.model_name} ${prediction.model_version} | 置信度 ${(Number(prediction.confidence)*100).toFixed(1)}%`;const label=document.createElement("pre");label.style.cssText="white-space:pre-wrap;margin:4px 0;max-height:70px;overflow:auto";label.textContent=JSON.stringify(prediction.label,null,2);const actions=document.createElement("div");for(const action of ["accept","reject"]){const button=document.createElement("button");button.type="button";button.textContent=action==="accept"?"接受":"拒绝";button.onclick=()=>decidePrediction(prediction,action,button);actions.append(button)}card.append(title,label,actions);box.append(card)}}catch(error){$("prediction-list").textContent=error.message;}}
+  async function decidePrediction(prediction,action,button){button.disabled=true;try{await request(`/api/predictions/${encodeURIComponent(prediction.prediction_id)}/${action}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({actor:localStorage.getItem("video-labeler:actor")||"human",expected_revision:rows[current]?.revision})});await loadPage()}catch(error){setStatus(error.message,true)}finally{button.disabled=false}}
+  async function loadPage(){try{const status=await request("/api/status");mode=status.mode;$("dataset").textContent=status.ready?`${status.video_root_name} / ${status.csv_name}`:"未选择视频目录";$("events-section").style.display=status.ready?"block":"none";const response=await fetch(`/api/videos?${queryParams()}`,{cache:"no-store"});const data=await response.json();if(!response.ok)throw new Error(data.error||"加载视频失败");rows=data;pageTotal=Number(response.headers.get("X-Total-Count")||rows.length);current=-1;renderPageIndicator();renderList();if(rows.length){await openRow(0);restoreDraft()}else setStatus(status.ready?"没有发现可播放视频":"请选择一个视频文件夹");await Promise.all([loadQuality(),loadPredictions()])}catch(error){setStatus(error.message,true)}}
+  load=loadPage;
+  const originalSaveUpgrade=save;save=async function(review=false){const result=await originalSaveUpgrade(review);if(result)await Promise.all([loadQuality(),loadPredictions()]);return result};
+  $("page-size").onchange=()=>{pageLimit=Number($("page-size").value);pageOffset=0;loadPage()};$("page-prev").onclick=()=>{pageOffset=Math.max(0,pageOffset-pageLimit);loadPage()};$("page-next").onclick=()=>{if(pageOffset+pageLimit<pageTotal){pageOffset+=pageLimit;loadPage()}};$("row-search").oninput=()=>{clearTimeout(window.__rowSearchTimer);window.__rowSearchTimer=setTimeout(()=>{pageOffset=0;loadPage()},250)};$("row-status").onchange=()=>{pageOffset=0;loadPage()};$("filter").addEventListener("change",()=>{pageOffset=0;loadPage()});$("quality-mode").onchange=loadQuality;$("quality-refresh").onclick=loadQuality;
+})();
+</script>
 </body>
 </html>"""
 
@@ -1258,6 +1281,22 @@ def _normalize_html(html: str) -> str:
 HTML = _normalize_html(HTML)
 
 
+def _parse_page(query: dict[str, list[str]]) -> tuple[int, int]:
+    def integer(name: str, default: int) -> int:
+        raw = query.get(name, [str(default)])[0]
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must be an integer") from error
+        if name == "offset" and value < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if name == "limit" and not 1 <= value <= AnnotationService.MAX_PAGE_SIZE:
+            raise ValueError(f"limit must be between 1 and {AnnotationService.MAX_PAGE_SIZE}")
+        return value
+
+    return integer("offset", 0), integer("limit", 100)
+
+
 class LabelerHTTPServer(ThreadingHTTPServer):
     def __init__(
         self,
@@ -1273,17 +1312,19 @@ class LabelerHTTPServer(ThreadingHTTPServer):
 class Handler(BaseHTTPRequestHandler):
     server: LabelerHTTPServer
 
-    def send_bytes(self, status: int, content_type: str, body: bytes) -> None:
+    def send_bytes(self, status: int, content_type: str, body: bytes, headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
-    def send_json(self, status: int, body: dict[str, object] | list[object]) -> None:
-        self.send_bytes(status, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False).encode("utf-8"))
+    def send_json(self, status: int, body: dict[str, object] | list[object], headers: dict[str, str] | None = None) -> None:
+        self.send_bytes(status, "application/json; charset=utf-8", json.dumps(body, ensure_ascii=False).encode("utf-8"), headers)
 
-    def _rows_for_client(self) -> list[dict[str, object]]:
+    def _rows_for_client(self, query: dict[str, list[str]] | None = None) -> tuple[list[dict[str, object]], int, int, int] | list[dict[str, object]]:
         state = self.server.state
         if not state.ready:
             return []
@@ -1300,7 +1341,18 @@ class Handler(BaseHTTPRequestHandler):
                 item["review_status"] = row.get("review_status") or "pending"
             item["video_url"] = "/video/" + row.get("video_path", "").replace("\\", "/")
             output.append(item)
-        return output
+        if not query or not any(key in query for key in ("offset", "limit", "q", "status")):
+            return output
+        offset, limit = _parse_page(query)
+        status = query.get("status", [""])[0].strip()
+        search = query.get("q", [""])[0].strip().casefold()
+        if status:
+            wanted = {"draft", "pending"} if status.casefold() in {"draft", "pending"} else {status.casefold()}
+            output = [item for item in output if str(item.get("review_status", "")).casefold() in wanted]
+        if search:
+            output = [item for item in output if search in str(item.get("sample_id", "")).casefold() or search in str(item.get("video_path", "")).casefold()]
+        total = len(output)
+        return output[offset : offset + limit], total, offset, limit
 
     def do_GET(self) -> None:
         request_path = unquote(urlparse(self.path).path)
@@ -1315,8 +1367,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         if request_path == "/api/videos":
             try:
-                self.send_json(200, self._rows_for_client())
+                result = self._rows_for_client(parse_qs(urlparse(self.path).query, keep_blank_values=True))
+                if isinstance(result, tuple):
+                    rows, total, offset, limit = result
+                    self.send_json(200, rows, {"X-Total-Count": str(total), "X-Page-Offset": str(offset), "X-Page-Limit": str(limit)})
+                else:
+                    self.send_json(200, result)
             except (ValueError, OSError) as error:
+                self.send_json(400, {"ok": False, "error": str(error)})
+            return
+        if request_path == "/api/predictions":
+            if self.server.state.service is None:
+                self.send_json(200, {"items": [], "total": 0, "offset": 0, "limit": 100})
+                return
+            try:
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                offset, limit = _parse_page(query)
+                status = query.get("status", [None])[0] or None
+                task = query.get("task", [None])[0] or None
+                items = self.server.state.service.list_prediction_records(status, task, offset, limit)
+                total = self.server.state.service.count_predictions(status, task)
+                self.send_json(200, {"items": items, "total": total, "offset": offset, "limit": limit})
+            except ValueError as error:
+                self.send_json(400, {"ok": False, "error": str(error)})
+            return
+        if request_path == "/api/quality":
+            if self.server.state.service is None:
+                self.send_json(404, {"ok": False, "error": "quality requires SQLite mode"})
+                return
+            try:
+                mode = parse_qs(urlparse(self.path).query, keep_blank_values=True).get("mode", ["draft"])[0] or "draft"
+                self.send_json(200, self.server.state.service.quality_snapshot(mode))
+            except ValueError as error:
                 self.send_json(400, {"ok": False, "error": str(error)})
             return
         if request_path.startswith("/api/predictions/"):

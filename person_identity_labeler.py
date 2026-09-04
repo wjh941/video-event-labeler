@@ -397,6 +397,8 @@ class AppState:
                 "video_path": sample.relative_path,
                 "person_count": str(item.get("person_count", 0)),
                 "person_identity_attributes": json.dumps(item.get("person_identity_attributes", []), ensure_ascii=False, separators=(",", ":")),
+                "review_status": sample.status,
+                "revision": str(sample.revision),
             })
 
     def db_revision(self) -> str:
@@ -439,21 +441,38 @@ class AppState:
             "video_url": f"/video?row={index}",
             "behavior_id": row.get("behavior_id", ""),
             "person_count": len(people),
+            "revision": int(row.get("revision") or 0),
             "person_identity_attributes": people,
             "events": row.get("events", ""),
             "behaviors": behaviors,
+            "review_status": row.get("review_status", "pending"),
         }
 
-    def state_payload(self) -> Dict[str, Any]:
+    def state_payload(self, offset: int | None = None, limit: int | None = None, search: str = "", status: str = "") -> Dict[str, Any]:
         with self.lock:
             if self.service is not None:
                 self._refresh_db_rows()
+            rows = [self.row_payload(i) for i in range(len(self.rows))]
+            if search:
+                needle = search.casefold()
+                rows = [row for row in rows if needle in str(row.get("sample_id", "")).casefold() or needle in str(row.get("video_name", "")).casefold()]
+            if status:
+                rows = [row for row in rows if str(row.get("review_status", "")).casefold() == status.casefold()]
+            total = len(rows)
+            paged = offset is not None or limit is not None or bool(search) or bool(status)
+            if paged:
+                actual_offset = 0 if offset is None else offset
+                actual_limit = 100 if limit is None else limit
+                rows = rows[actual_offset : actual_offset + actual_limit]
+            else:
+                actual_offset, actual_limit = 0, total
             return {
                 "video_root": str(self.video_root),
                 "csv_path": str(self.csv_path),
                 "csv_revision": self.db_revision(),
-                "row_count": len(self.rows),
-                "rows": [self.row_payload(i) for i in range(len(self.rows))],
+                "row_count": total,
+                "rows": rows,
+                **({"offset": actual_offset, "limit": actual_limit, "has_more": actual_offset + len(rows) < total} if paged else {}),
             }
 
     def save_row(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1381,8 +1400,8 @@ HTML_PAGE = r"""<!doctype html>
       saving = true;
       document.getElementById("saveButton").disabled = true;
       setStatus("正在保存...");
-      const payload = {
-        row_index: selectedIndex,
+        const payload = {
+          row_index: appState.rows[selectedIndex]?.row_index ?? selectedIndex,
         sample_id: sampleId.value,
         person_count: people.length,
         people,
@@ -1426,7 +1445,27 @@ HTML_PAGE = r"""<!doctype html>
     document.getElementById("previousButton").addEventListener("click", () => saveCurrent(-1));
     document.getElementById("nextButton").addEventListener("click", () => saveCurrent(1));
 
-    loadState().catch((error) => setStatus(error.message || String(error), "error"));
+    window.__loadState = loadState;
+  </script>
+  <script>
+    (function(){
+      const editor=document.querySelector(".editor"), toolbar=document.createElement("div");
+      toolbar.style.cssText="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px";
+      toolbar.innerHTML='<input id="rowSearch" placeholder="搜索文件名" aria-label="搜索文件名" style="flex:1;min-width:130px"><select id="rowStatus" aria-label="审核状态"><option value="">全部状态</option><option value="draft">草稿</option><option value="reviewed">已审核</option><option value="rejected">已拒绝</option></select><select id="rowPageSize" aria-label="每页条数"><option value="50">50 / 页</option><option value="100" selected>100 / 页</option><option value="200">200 / 页</option></select><button id="rowPrev" type="button">上一页</button><span id="rowPage" aria-live="polite">第 1 页</span><button id="rowNext" type="button">下一页</button>';
+      editor.insertBefore(toolbar,editor.firstElementChild.nextElementSibling);
+      const quality=document.createElement("div");quality.className="field";quality.id="qualityPanel";quality.innerHTML='<div class="field-heading">数据质量</div><div id="qualityMetrics">加载中...</div><div style="display:flex;gap:6px;margin-top:6px"><select id="qualityMode" aria-label="质量模式"><option value="draft">草稿模式</option><option value="strict">严格模式</option></select><button id="qualityRefresh" type="button">刷新质量</button></div><div id="qualityIssues" style="max-height:130px;overflow:auto;margin-top:5px"></div>';editor.insertBefore(quality,document.querySelector(".footer-actions"));
+      const prediction=document.createElement("div");prediction.className="field";prediction.id="predictionPanel";prediction.innerHTML='<div class="field-heading">模型预测审核</div><div id="predictionList">加载中...</div>';editor.insertBefore(prediction,quality);
+      let offset=0,limit=100,total=0;
+      function params(){const query=new URLSearchParams({offset:String(offset),limit:String(limit)});const search=$("rowSearch").value.trim();const statusFilter=$("rowStatus").value;if(search)query.set("q",search);if(statusFilter)query.set("status",statusFilter);return query}
+      function $(id){return document.getElementById(id)}
+      function pageIndicator(){const page=Math.floor(offset/limit)+1,pages=Math.max(1,Math.ceil(total/limit));$("rowPage").textContent=`第 ${page} / ${pages} 页`;$("rowPrev").disabled=offset===0;$("rowNext").disabled=offset+limit>=total}
+      async function loadQuality(){try{const data=await fetch(`/api/quality?mode=${encodeURIComponent($("qualityMode").value)}`).then(async response=>{const body=await response.json();if(!response.ok)throw new Error(body.error||"质量检查失败");return body});const stats=data.stats,report=data.quality;$("qualityMetrics").textContent=`样本 ${stats.sample_count} | 已审核 ${stats.reviewed_samples} | 草稿 ${stats.draft_samples} | 完成率 ${(Number(stats.completion_rate||0)*100).toFixed(1)}% | 错误 ${report.errors.length} | 警告 ${report.warnings.length}`;const box=$("qualityIssues");box.replaceChildren();for(const issue of [...report.errors,...report.warnings].slice(0,100)){const item=document.createElement("div");item.textContent=`${issue.sample_id||""} ${issue.code}: ${issue.message}`;box.append(item)}}catch(error){$("qualityMetrics").textContent=error.message}}
+      async function loadPredictions(){try{const data=await fetch("/api/predictions?status=draft&limit=100").then(response=>response.json());const box=$("predictionList");box.replaceChildren();if(!data.items?.length){box.textContent="暂无待审核预测";return}for(const prediction of data.items){const card=document.createElement("div");card.style.cssText="border:1px solid #404955;padding:6px;margin:4px 0;font-size:11px";const title=document.createElement("div");title.textContent=`${prediction.sample_id} | ${prediction.task} | ${prediction.model_name} ${prediction.model_version} | ${(Number(prediction.confidence)*100).toFixed(1)}%`;const label=document.createElement("pre");label.textContent=JSON.stringify(prediction.label,null,2);label.style.cssText="white-space:pre-wrap;max-height:70px;overflow:auto";for(const action of ["accept","reject"]){const button=document.createElement("button");button.type="button";button.textContent=action==="accept"?"接受":"拒绝";button.onclick=async()=>{button.disabled=true;try{const response=await fetch(`/api/predictions/${encodeURIComponent(prediction.prediction_id)}/${action}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({actor:localStorage.getItem("video-labeler:actor")||"human",expected_revision:appState.rows[selectedIndex]?.revision})});const result=await response.json();if(!response.ok)throw new Error(result.error||"预测操作失败");await window.__loadState();await loadPredictions();await loadQuality()}catch(error){setStatus(error.message,"error")}finally{button.disabled=false}};card.append(button)}card.prepend(title,label);box.append(card)}}catch(error){$("predictionList").textContent=error.message}}
+      async function loadPage(){try{const response=await fetch(`/api/state?${params()}`,{cache:"no-store"});const body=await response.json();if(!response.ok)throw new Error(body.error||"无法读取数据");appState=body;csvRevision=body.csv_revision||"";total=body.row_count;selectedIndex=0;pageIndicator();renderRows();if(appState.rows.length)renderRow(0);await Promise.all([loadQuality(),loadPredictions()])}catch(error){setStatus(error.message,"error")}}
+      window.__loadState=loadPage;
+      const originalSaveCurrent=saveCurrent;saveCurrent=async function(moveBy=0){const result=await originalSaveCurrent(moveBy);await Promise.all([loadQuality(),loadPredictions()]);return result};
+      $("rowPageSize").onchange=()=>{limit=Number($("rowPageSize").value);offset=0;loadPage()};$("rowPrev").onclick=()=>{offset=Math.max(0,offset-limit);loadPage()};$("rowNext").onclick=()=>{if(offset+limit<total){offset+=limit;loadPage()}};$("rowSearch").oninput=()=>{clearTimeout(window.__rowSearchTimer);window.__rowSearchTimer=setTimeout(()=>{offset=0;loadPage()},250)};$("rowStatus").onchange=()=>{offset=0;loadPage()};$("qualityMode").onchange=loadQuality;$("qualityRefresh").onclick=loadQuality;loadPage();
+    })();
   </script>
 </body>
 </html>
@@ -1448,7 +1487,8 @@ class VideoCsvHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        route = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        route = parsed.path
         if route == "/":
             body = HTML_PAGE.encode("utf-8")
             self.send_response(HTTPStatus.OK)
@@ -1458,7 +1498,45 @@ class VideoCsvHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if route == "/api/state":
-            self.send_json(self.state.state_payload())
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            try:
+                paged = any(key in query for key in ("offset", "limit", "q", "status"))
+                if paged:
+                    offset, limit = _parse_page(query)
+                    status = query.get("status", [""])[0].strip()
+                    if status and status not in ("draft", "reviewed", "rejected", "pending"):
+                        raise ValueError("status must be draft, reviewed, rejected, pending, or omitted")
+                    payload = self.state.state_payload(offset, limit, query.get("q", [""])[0].strip(), status)
+                else:
+                    payload = self.state.state_payload()
+                self.send_json(payload)
+            except ValueError as error:
+                self.send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if route == "/api/predictions":
+            if self.state.service is None:
+                self.send_json({"items": [], "total": 0, "offset": 0, "limit": 100})
+                return
+            try:
+                query = parse_qs(parsed.query, keep_blank_values=True)
+                offset, limit = _parse_page(query)
+                status = query.get("status", [None])[0] or None
+                task = query.get("task", [None])[0] or None
+                items = self.state.service.list_prediction_records(status, task, offset, limit)
+                total = self.state.service.count_predictions(status, task)
+                self.send_json({"items": items, "total": total, "offset": offset, "limit": limit})
+            except ValueError as error:
+                self.send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if route == "/api/quality":
+            if self.state.service is None:
+                self.send_json({"ok": False, "error": "quality requires SQLite mode"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                mode = parse_qs(parsed.query, keep_blank_values=True).get("mode", ["draft"])[0] or "draft"
+                self.send_json(self.state.service.quality_snapshot(mode))
+            except ValueError as error:
+                self.send_json({"ok": False, "error": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if route.startswith("/api/predictions/") and self.state.service is not None:
             prediction = self.state.service.get_prediction(route.rsplit("/", 1)[-1])
@@ -1607,6 +1685,22 @@ def choose_server(host: str, requested_port: int) -> Tuple[ThreadingHTTPServer, 
         except OSError as exc:
             last_error = exc
     raise OSError(f"无法找到可用端口，尝试范围 {requested_port}-{requested_port + 19}") from last_error
+
+
+def _parse_page(query: dict[str, list[str]]) -> tuple[int, int]:
+    def integer(name: str, default: int) -> int:
+        raw = query.get(name, [str(default)])[0]
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{name} must be an integer") from error
+        if name == "offset" and value < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if name == "limit" and not 1 <= value <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        return value
+
+    return integer("offset", 0), integer("limit", 100)
 
 
 def parse_args() -> argparse.Namespace:

@@ -48,6 +48,8 @@ class RowPayload:
 
 
 class AnnotationService:
+    MAX_PAGE_SIZE = 500
+
     def __init__(self, store: SQLiteStore, video_root: Path, provider: AnnotationProvider | None = None) -> None:
         self.store = store
         self.video_root = Path(video_root).resolve()
@@ -96,8 +98,73 @@ class AnnotationService:
                           person_payload, len(people), str(sample.revision), sample.revision, sample.status)
 
     def list_rows(self, offset: int = 0, limit: int = 100, filters: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+        self._validate_page(offset, limit)
         status = (filters or {}).get("status") if filters else None
         return [self._row(s).as_dict() for s in self.store.list_samples(limit, offset, status=status)]
+
+    @classmethod
+    def _validate_page(cls, offset: int, limit: int) -> None:
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= cls.MAX_PAGE_SIZE:
+            raise ValueError(f"limit must be between 1 and {cls.MAX_PAGE_SIZE}")
+
+    def count_rows(self, status: str | None = None) -> int:
+        if status == "pending":
+            status = "draft"
+        if status not in (None, "draft", "reviewed", "rejected"):
+            raise ValueError("status must be draft, reviewed, rejected, or omitted")
+        return self.store.count_samples(status)
+
+    def list_prediction_records(
+        self,
+        status: str | None = None,
+        task: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        self._validate_page(offset, limit)
+        if status not in (None, "draft", "accepted", "rejected"):
+            raise ValueError("status must be draft, accepted, rejected, or omitted")
+        if task not in (None, "event", "person"):
+            raise ValueError("task must be event, person, or omitted")
+        records = []
+        for row in self.store.list_prediction_records(limit, offset, status, task):
+            try:
+                label: Any = json.loads(row["label_json"])
+            except json.JSONDecodeError:
+                label = None
+            records.append({
+                "prediction_id": row["prediction_id"],
+                "sample_id": row["sample_id"],
+                "task": row["task"],
+                "label_json": row["label_json"],
+                "label": label,
+                "model_name": row["model_name"],
+                "model_version": row["model_version"],
+                "confidence": row["confidence"],
+                "created_at": row["created_at"],
+                "review_status": row["review_status"],
+                "annotator": row["annotator"],
+                "decided_at": row["decided_at"],
+            })
+        return records
+
+    def count_predictions(self, status: str | None = None, task: str | None = None) -> int:
+        if status not in (None, "draft", "accepted", "rejected"):
+            raise ValueError("status must be draft, accepted, rejected, or omitted")
+        if task not in (None, "event", "person"):
+            raise ValueError("task must be event, person, or omitted")
+        return self.store.count_predictions(status, task)
+
+    def quality_snapshot(self, mode: str = "draft") -> dict[str, Any]:
+        from .quality import dataset_stats, validate_dataset
+
+        return {
+            "stats": dataset_stats(self.store),
+            "quality": validate_dataset(self.store, mode=mode).to_dict(),
+            "generated_at": utc_now(),
+        }
 
     def get_row(self, sample_id: str) -> RowPayload:
         sample = self.store.get_sample(sample_id)

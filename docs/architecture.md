@@ -2,6 +2,13 @@
 
 The application is a local, SQLite-first annotation tool. CSV is a compatibility boundary only.
 
+The adapters expose optional pagination parameters without changing their legacy
+no-query response shapes. `GET /api/predictions` reads model candidates with
+review metadata, while `GET /api/quality?mode=draft|strict` combines
+`dataset_stats()` and `validate_dataset()` into the dashboard payload. Browser
+panels use the same revision-aware accept/reject and save routes as the existing
+annotation workflow.
+
 ```text
 video files -> CSV import -> SQLiteStore -> AnnotationService -> browser adapters
                                       -> quality/stats -> CSV or JSONL export
