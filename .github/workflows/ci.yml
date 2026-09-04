@@ -2,6 +2,8 @@ name: ci
 on: [push, pull_request]
 jobs:
   test:
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
