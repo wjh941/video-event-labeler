@@ -15,6 +15,7 @@ import re
 import shutil
 import tempfile
 import threading
+import webbrowser
 from collections.abc import Callable
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -1504,11 +1505,23 @@ def print_startup(server: LabelerHTTPServer, state: AppState) -> None:
         print("请在网页中点击“导入视频文件夹”开始。")
 
 
+def open_browser_for_server(server: LabelerHTTPServer) -> None:
+    """Open the local UI and retain a terminal fallback when unavailable."""
+    url = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        if not webbrowser.open(url):
+            print(f"无法自动打开浏览器，请手动访问: {url}")
+    except Exception as error:
+        print(f"无法自动打开浏览器，请手动访问 {url}: {error}")
+
+
 def run_desktop_app(
     state: AppState,
     root: object,
     broker: TkFolderPickerBroker,
     server: LabelerHTTPServer,
+    *,
+    open_browser: bool = False,
 ) -> None:
     server_thread = threading.Thread(target=server.serve_forever, name="labeler-http")
     server_started = False
@@ -1516,6 +1529,8 @@ def run_desktop_app(
         server_thread.start()
         server_started = True
         print_startup(server, state)
+        if open_browser:
+            open_browser_for_server(server)
         root.mainloop()
     except KeyboardInterrupt:
         pass
@@ -1530,9 +1545,11 @@ def run_desktop_app(
             raise RuntimeError("HTTP server did not stop cleanly")
 
 
-def run_headless_app(state: AppState, port: int) -> None:
+def run_headless_app(state: AppState, port: int, *, open_browser: bool = False) -> None:
     server = create_server(state, port)
     print_startup(server, state)
+    if open_browser:
+        open_browser_for_server(server)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1547,6 +1564,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--csv", type=Path, help="已有或要生成的 manifest CSV")
     parser.add_argument("--port", type=int, default=8765, help="本地网页端口，默认 8765")
     parser.add_argument("--db", type=Path, help="SQLite database path")
+    parser.add_argument("--no-browser", action="store_true", help="只启动服务，不自动打开浏览器")
     return parser
 
 
@@ -1592,7 +1610,7 @@ def main() -> None:
         root, broker = create_tk_picker()
     except Exception as error:
         print(f"{PICKER_UNAVAILABLE_MESSAGE}: {error}")
-        run_headless_app(state, args.port)
+        run_headless_app(state, args.port, open_browser=not getattr(args, "no_browser", False))
         return
 
     try:
@@ -1601,7 +1619,13 @@ def main() -> None:
         broker.close()
         root.destroy()
         raise
-    run_desktop_app(state, root, broker, server)
+    run_desktop_app(
+        state,
+        root,
+        broker,
+        server,
+        open_browser=not getattr(args, "no_browser", False),
+    )
 
 
 if __name__ == "__main__":

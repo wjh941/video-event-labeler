@@ -1040,12 +1040,29 @@ class ApplicationLifecycleTests(unittest.TestCase):
         self.assertTrue(server.closed)
         self.assertTrue(root.destroyed)
 
+    def test_run_desktop_app_can_open_browser_after_server_start(self):
+        server = self.FakeServer()
+        root = self.FakeRoot(server.started)
+        broker = self.FakeBroker()
+
+        with patch.object(labeler.webbrowser, "open", return_value=True) as open_browser:
+            with redirect_stdout(io.StringIO()):
+                labeler.run_desktop_app(
+                    labeler.AppState(),
+                    root,
+                    broker,
+                    server,
+                    open_browser=True,
+                )
+
+        open_browser.assert_called_once_with("http://127.0.0.1:8765/")
+
     def test_main_uses_headless_server_when_tk_initialization_fails(self):
         args = argparse.Namespace(video_root=None, csv=None, port=8765)
         state = labeler.AppState()
         fallback = {}
 
-        def run_headless(actual_state, port):
+        def run_headless(actual_state, port, **_kwargs):
             fallback["state"] = actual_state
             fallback["port"] = port
 
@@ -1224,6 +1241,11 @@ class CliTests(unittest.TestCase):
             (args.video_root, args.csv, args.port),
             (Path("D:/videos"), Path("D:/videos/manifest.csv"), 8766),
         )
+
+    def test_parser_accepts_no_browser(self):
+        args = labeler.build_parser().parse_args(["--no-browser"])
+
+        self.assertTrue(args.no_browser)
 
 
 if __name__ == "__main__":

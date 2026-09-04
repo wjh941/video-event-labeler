@@ -53,6 +53,14 @@ python .\run_video_annotation.py --video-root 'D:\videos' --event-port 9000 --pe
 python .\video_event_labeler.py --video-root 'D:\videos'
 ```
 
+行为标注脚本启动后会自动打开本地浏览器。如果浏览器没有自动打开，请复制终端打印的 `http://127.0.0.1:<port>/` 地址访问。需要手动控制浏览器时可使用：
+
+```powershell
+python .\video_event_labeler.py --video-root 'D:\videos' --no-browser
+```
+
+页面中的“导入视频文件夹”会调用系统原生文件夹选择器。若系统没有桌面会话、Tk 初始化失败或对话框被系统策略阻止，接口会返回明确提示，此时在旁边的路径框输入绝对路径并点击“按路径导入”即可继续，不影响 CSV/SQLite 导入流程。
+
 也可以指定已有 CSV 或数据库：
 
 ```powershell
