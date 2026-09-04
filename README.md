@@ -2,14 +2,12 @@
 
 SQLite platform commands, schema details, and a reproducible synthetic demo are documented in `docs/architecture.md`, `docs/data-model.md`, and `docs/demo_dataset/README.md`. The current database schema is version 3.
 
-Validation: `python -m video_labeler validate --db dataset.db`.
-
-本仓库提供一套本地视频标注工具：先从视频目录生成行为事件 CSV，再使用同一份 CSV 标注人物身份属性。工具只使用 Python 标准库，不需要安装第三方 Python 包。
+本仓库提供一套本地视频标注工具：先从视频目录生成行为事件 CSV，再使用同一份 CSV 标注人物身份属性。工具只使用 Python 标准库，不需要安装第三方 Python 包。SQLite 是正式数据源，CSV 用于兼容导入和导出。
 
 ## 环境
 
-- Windows
-- Python 3.10 或更高版本
+- Windows 或 Linux
+- Python 3.11 或更高版本
 - 一个按目录组织的视频数据集
 
 进入仓库目录：
@@ -29,10 +27,11 @@ python .\run_video_annotation.py --video-root 'D:\videos'
 启动器会：
 
 1. 扫描视频目录，创建或增量更新 `video_labeler_manifest.csv`。
-2. 打开行为事件标注页面。
-3. 行为阶段完成后，在终端按 `Ctrl+C` 停止第一阶段。
-4. 自动启动人物身份标注页面。
-5. 人物阶段完成后，在终端按 `Ctrl+C` 结束。
+2. 在视频目录中默认创建或打开 `dataset.db`，并建立媒体索引。
+3. 打开行为事件标注页面。
+4. 行为阶段完成后，在终端按 `Ctrl+C` 停止第一阶段。
+5. 自动启动人物身份标注页面。
+6. 人物阶段完成后，在终端按 `Ctrl+C` 结束。
 
 如果行为事件已经标完，只进入人物阶段：
 
@@ -54,12 +53,13 @@ python .\run_video_annotation.py --video-root 'D:\videos' --event-port 9000 --pe
 python .\video_event_labeler.py --video-root 'D:\videos'
 ```
 
-也可以指定已有 CSV：
+也可以指定已有 CSV 或数据库：
 
 ```powershell
 python .\video_event_labeler.py `
   --video-root 'D:\videos' `
-  --csv 'D:\videos\my_manifest.csv'
+  --csv 'D:\videos\my_manifest.csv' `
+  --db 'D:\videos\dataset.db'
 ```
 
 不带命令行参数时，页面支持选择视频文件夹或输入目录路径。工具会递归扫描常见格式：`.mp4`、`.avi`、`.mov`、`.mkv`、`.webm`、`.m4v`。
@@ -69,12 +69,18 @@ python .\video_event_labeler.py `
 ```powershell
 python .\person_identity_labeler.py `
   --video-root 'D:\videos' `
+  --db 'D:\videos\dataset.db'
+```
+
+也可使用已有 CSV（兼容模式）：
+
+```powershell
+python .\person_identity_labeler.py `
+  --video-root 'D:\videos' `
   --csv 'D:\videos\video_labeler_manifest.csv'
 ```
 
-人物脚本会根据 CSV 每一行的 `video_path` 自动切换原视频。点击事件卡片的“播放片段”时，会从该事件的开始时间播放到结束时间并自动暂停，不会生成新视频。
-
-人物脚本只保存人物字段，行为类型、事件时间、灯光和其他字段由行为标注脚本维护。事件卡片在人物页面中用于回看检查，属于只读内容。
+人物脚本会根据每一行的 `video_path` 自动切换原视频。点击事件卡片的“播放片段”时，会从该事件的开始时间播放到结束时间并自动暂停，不会生成新视频。人物脚本只保存人物字段，行为类型、事件时间、灯光和其他字段由行为标注脚本维护。
 
 ## 推荐目录结构
 
@@ -102,7 +108,7 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 | 字段 | 用途 |
 | --- | --- |
 | `sample_id` | 视频文件名，作为稳定记录 ID |
-| `video_path` | 原视频绝对路径；人物页面按此路径切换视频 |
+| `video_path` | 原视频相对路径；人物页面按此路径切换视频 |
 | `lighting` | 从目录名推断的白天、黑夜或红外 |
 | `lighting_evidence` | 默认 `人工确认` |
 | `behavior_class` | 目录推断的行为类别 |
@@ -147,7 +153,7 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 
 ## 人物标注流程
 
-1. 选择当前 CSV 记录，确认页面已经切换到对应原视频。
+1. 选择当前记录，确认页面已经切换到对应原视频。
 2. 填写人员数量；`0` 表示画面中没有需要标注的人员。
 3. 为每个人填写唯一编号、年龄段、人脸熟悉度和体态熟悉度。
 4. 使用事件卡片的“播放片段”检查行为区间与人物属性是否匹配。
@@ -155,14 +161,27 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 
 人物页面不会改写事件字段；如果需要调整行为或时间，请回到 `video_event_labeler.py`。
 
+## SQLite 维护与导出
+
+```powershell
+python -m video_labeler index-media --db 'D:\videos\dataset.db' --video-root 'D:\videos'
+python -m video_labeler validate --db 'D:\videos\dataset.db' --mode strict
+python -m video_labeler backup-db --db 'D:\videos\dataset.db' --output 'D:\backups\dataset.db'
+python -m video_labeler check-db --db 'D:\videos\dataset.db'
+python -m video_labeler export --db 'D:\videos\dataset.db' --format jsonl --output 'D:\exports\train.jsonl'
+```
+
+`backup-db` 使用 SQLite 在线备份接口，兼容 WAL；`check-db` 执行完整性检查。严格质量模式会拒绝未审核、缺失时间或无效事件，草稿模式适合持续标注。
+
 ## 安全写入与恢复
 
-- 写入前会在 CSV 同目录创建 `.bak` 或 `event_labeler_backups` 时间戳备份。
-- 使用临时文件和原子替换，避免半写入 CSV。
-- 行为脚本检测 CSV 是否被外部修改；冲突时不会覆盖外部修改。
+- SQLite 写入使用事务、乐观修订号和文件锁；过期页面保存会返回冲突，不覆盖新数据。
+- 写入前会创建时间戳备份，并使用临时文件和原子替换，避免半写入 CSV/JSONL。
+- 行为和人物页面都会自动保存未提交草稿到浏览器本地存储，刷新后可恢复。
 - 从旧 CSV 迁移时会补齐 `person_count`、`person_identity_attributes`，并移除旧的 `person_tag_list`。
+- 本地视频路径必须位于 `--video-root` 下，路径穿越请求会被拒绝。
 
-恢复方式：关闭标注服务，把备份文件复制回原 CSV 文件名，然后重新启动脚本。
+恢复方式：关闭标注服务，使用 `backup-db` 生成的数据库备份或 CSV 同目录时间戳备份恢复，然后重新启动脚本。
 
 ## 常见问题
 
@@ -172,40 +191,33 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 
 ### 视频不存在
 
-确认 CSV 的 `video_path` 指向真实文件；相对路径需要配合 `--video-root` 使用。
+确认数据库或 CSV 的 `video_path` 是相对于 `--video-root` 的真实文件；重新运行 `index-media` 可刷新媒体状态。
 
-### 保存提示 CSV 被外部修改
+### 保存提示版本冲突
 
-关闭其他正在编辑该 CSV 的程序，刷新页面，重新确认当前记录后再保存。
+关闭其他编辑页面，刷新后重新确认当前记录再保存。服务不会覆盖较新的修订。
 
 ### 需要重新扫描目录
 
-再次运行 `video_event_labeler.py --video-root ...`。已存在记录的人工事件和人物属性会保留，新视频会增量加入。
+再次运行 `video_event_labeler.py --video-root ...` 或 `index-media`。已存在记录的人工事件和人物属性会保留，新视频会增量加入。
 
 ## 测试
 
 ```powershell
 python -m pytest -q
+ruff check video_labeler
+mypy video_labeler --exclude 'video_labeler/(storage|services|quality)'
 ```
 
 ## SQLite compatibility adapter
 
-SQLite is the internal source of truth. Import existing manifests and export
-compatibility CSV files with these commands:
+SQLite is the internal source of truth. Import existing manifests and export compatibility CSV files with these commands:
 
 ```powershell
-python -m video_labeler import-csv --csv video_labeler_manifest.csv --video-root D:\\videos --db dataset.db
-python -m video_labeler export-csv --db dataset.db --csv video_labeler_manifest.csv --video-root D:\\videos
+python -m video_labeler import-csv --csv 'D:\videos\video_labeler_manifest.csv' --video-root 'D:\videos' --db 'D:\videos\dataset.db'
+python -m video_labeler export-csv --db 'D:\videos\dataset.db' --csv 'D:\videos\video_labeler_manifest.csv' --video-root 'D:\videos'
 ```
 
-The adapter accepts UTF-8/BOM CSV and common delimiters, stores unknown columns
-in `samples.extra_json`, derives `person_count` from `person_identity_attributes`,
-and computes deterministic sample/event/person identifiers. Legacy
-`person_tag_list` is discarded during import and never emitted on export. A
-changed or deleted source video is reported as `stale` while annotations remain
-untouched. Export writes a UTF-8 BOM CSV, a timestamped backup when needed, and
-`<csv>.meta.json` with schema version, UTC export time, database revision, and
-sample count. Malformed JSON in draft rows is retained as a draft with an import
-error.
+The adapter accepts UTF-8/BOM CSV and common delimiters, stores unknown columns in `samples.extra_json`, derives `person_count` from `person_identity_attributes`, and computes deterministic sample/event/person identifiers. Legacy `person_tag_list` is discarded during import and never emitted on export. A changed or deleted source video is reported as `stale` while annotations remain untouched. Export writes a UTF-8 BOM CSV, a timestamped backup when needed, and `<csv>.meta.json` with schema version, UTC export time, database revision, and sample count. Malformed JSON in draft rows is retained as a draft with an import error.
 
-测试覆盖行为预标注、CSV 迁移、原子备份、并发修改检测、人物属性校验、多视频切换和事件字段保护。
+测试覆盖行为预标注、CSV 迁移、原子备份、并发修改检测、人物属性校验、多视频切换、事件字段保护、HTTP 接口以及数据库备份完整性。

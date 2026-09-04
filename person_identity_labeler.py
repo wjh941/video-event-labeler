@@ -1521,7 +1521,8 @@ class VideoCsvHandler(BaseHTTPRequestHandler):
                 raise ValueError("请求内容为空或过大")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             row = self.state.save_row(payload)
-            self.send_json({"ok": True, "row": row, "csv_revision": self.state.csv_revision()})
+            revision = self.state.db_revision() if self.state.store is not None else self.state.csv_revision()
+            self.send_json({"ok": True, "row": row, "csv_revision": revision})
         except CsvConflictError as exc:
             self.send_json({"ok": False, "error": str(exc)}, HTTPStatus.CONFLICT)
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -1540,6 +1541,11 @@ class VideoCsvHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND, "CSV row not found")
             return
         video_path = self.state.video_path_for_row(row_index)
+        try:
+            video_path.relative_to(self.state.video_root)
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND, "video file is outside video root")
+            return
         if not video_path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND, "video file not found")
             return

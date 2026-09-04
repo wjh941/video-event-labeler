@@ -14,9 +14,20 @@ The CLI is implemented with standard-library `argparse`:
 ```text
 python -m video_labeler import-csv --csv MANIFEST --video-root VIDEOS --db dataset.db
 python -m video_labeler export-csv --csv MANIFEST --video-root VIDEOS --db dataset.db
-python -m video_labeler validate --db dataset.db
+python -m video_labeler index-media --db dataset.db --video-root VIDEOS
+python -m video_labeler validate --db dataset.db --mode strict
 python -m video_labeler stats --db dataset.db
 python -m video_labeler export --db dataset.db --format jsonl --output train.jsonl
+python -m video_labeler backup-db --db dataset.db --output dataset.backup.db
+python -m video_labeler check-db --db dataset.db
 ```
+
+The recommended launcher is `python run_video_annotation.py --video-root VIDEOS`; it defaults the database to `VIDEOS/dataset.db`, imports a compatible CSV when present, and indexes supported videos with safe paths and optional ffprobe metadata.
+
+The event browser exposes `/api/status`, `/api/videos`, `/api/update`, and
+`/video/<relative-path>`. The person browser exposes `/api/state`, `/api/save`,
+and `/video?row=<index>`. Both adapters expose prediction reads and accept or
+reject actions under `/api/predictions/<prediction-id>`; stale revisions return
+HTTP 409 and missing samples or media return HTTP 404.
 
 Stale revision writes fail with a conflict (HTTP 409 in adapters); callers must reload before retrying.
