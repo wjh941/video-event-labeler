@@ -987,6 +987,11 @@ HTML_PAGE = r"""<!doctype html>
     let saving = false;
     let dirty = false;
     const RESUME_STORAGE_KEY = "video-labeler:last-sample";
+    const DRAFT_STORAGE_KEY = "video-labeler:person-draft";
+    let draftTimer = null;
+    function saveDraft(){clearTimeout(draftTimer);draftTimer=setTimeout(()=>{try{localStorage.setItem(DRAFT_STORAGE_KEY,JSON.stringify({sample_id:appState?.rows?.[selectedIndex]?.sample_id,people}))}catch{}},250)}
+    function restoreDraft(){try{return JSON.parse(localStorage.getItem(DRAFT_STORAGE_KEY)||"null")}catch{return null}}
+    window.addEventListener("beforeunload",event=>{if(dirty){saveDraft();event.returnValue=""}});
     let segmentTimer = null;
     let csvRevision = "";
     const BEHAVIOR_OPTIONS = [

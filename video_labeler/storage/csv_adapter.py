@@ -16,7 +16,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from ..domain import Event, Person, Sample, utc_now
 from ..schema import CURRENT_SCHEMA_VERSION
@@ -36,6 +36,10 @@ class ImportError:
     row_number: int
     message: str
     sample_id: str | None = None
+
+
+class CancellationError(RuntimeError):
+    """Raised when a streaming import or export is cancelled by the caller."""
 
 
 @dataclass
@@ -99,19 +103,24 @@ def _sha256_file(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+def _read_csv(path: Path) -> tuple[list[str], Iterator[dict[str, str]]]:
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         sample = handle.read(8192)
-        handle.seek(0)
         try:
             dialect = csv.Sniffer().sniff(sample, delimiters=",\t;|")
         except csv.Error:
             dialect = csv.excel
-        reader = csv.DictReader(handle, dialect=dialect)
+        reader = csv.DictReader(sample.splitlines(), dialect=dialect)
         fields = [field.strip() for field in (reader.fieldnames or []) if field and field.strip()]
-        if len(fields) != len(set(fields)):
-            raise ValueError("CSV contains duplicate column names")
-        return fields, [{str(k).strip(): (v or "") for k, v in row.items() if k is not None and str(k).strip()} for row in reader]
+    if len(fields) != len(set(fields)):
+        raise ValueError("CSV contains duplicate column names")
+
+    def rows() -> Iterator[dict[str, str]]:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle, dialect=dialect):
+                yield {str(k).strip(): (v or "") for k, v in row.items() if k is not None and str(k).strip()}
+
+    return fields, rows()
 
 
 def _json_value(raw: str, default: Any, field_name: str) -> Any:
@@ -196,14 +205,19 @@ def _existing_by_path(store: SQLiteStore, relative_path: str) -> Sample | None:
     return store._sample_from_row(row) if row else None
 
 
-def import_csv(path: Path, store: SQLiteStore, video_root: Path) -> ImportReport:
+def import_csv(path: Path, store: SQLiteStore, video_root: Path,
+               progress: Callable[[int], None] | None = None,
+               cancel: Callable[[], bool] | None = None) -> ImportReport:
     path, video_root = Path(path), Path(video_root)
     fields, rows = _read_csv(path)
     report = ImportReport()
     dataset_id = _dataset_id(video_root)
     store.upsert_dataset(dataset_id, str(video_root.resolve()))
     with FileLock(path.with_name(path.name + ".lock")):
+        processed = 0
         for row_number, row in enumerate(rows, start=2):
+            if cancel is not None and cancel():
+                raise CancellationError("CSV import cancelled")
             supplied_id = row.get("sample_id", "").strip() or None
             try:
                 relative_path = _normalise_relative_path(row.get("video_path", ""), video_root)
@@ -245,6 +259,9 @@ def import_csv(path: Path, store: SQLiteStore, video_root: Path) -> ImportReport
                     report.created += 1
             except (ValueError, TypeError, OverflowError, KeyError, StorageError) as exc:
                 report.errors.append(ImportError(row_number, str(exc), supplied_id))
+            processed += 1
+            if progress is not None:
+                progress(processed)
     return report
 
 
@@ -277,10 +294,11 @@ def _backup(path: Path) -> Path | None:
     return target
 
 
-def export_csv(store: SQLiteStore, path: Path, video_root: Path) -> ExportReport:
+def export_csv(store: SQLiteStore, path: Path, video_root: Path,
+               progress: Callable[[int], None] | None = None,
+               cancel: Callable[[], bool] | None = None) -> ExportReport:
     path, video_root = Path(path), Path(video_root)
     samples = store.list_samples(limit=10**9, offset=0)
-    rows: list[dict[str, str]] = []
     unknown: set[str] = set()
     for sample in samples:
         row_db = store.connection().execute("SELECT extra_json FROM samples WHERE sample_id = ?", (sample.sample_id,)).fetchone()
@@ -288,47 +306,53 @@ def export_csv(store: SQLiteStore, path: Path, video_root: Path) -> ExportReport
             extra = json.loads(row_db[0] or "{}") if row_db else {}
         except json.JSONDecodeError:
             extra = {}
-        if not isinstance(extra, dict):
-            extra = {}
-        unknown.update(str(key) for key in extra if key not in KNOWN_COLUMNS and key != "person_tag_list")
-        people = store.get_persons(sample.sample_id)
-        events = store.get_events(sample.sample_id)
-        person_json = [
-            {"person_id": p.person_id, "age_group": p.age_group, "face_familiarity": p.face_familiarity,
-             "body_reid_familiarity": p.body_reid_familiarity, **({"track_id": p.track_id} if p.track_id else {})}
-            for p in people
-        ]
-        event_json = [
-            {"event_type": e.event_type, "start_time_ms": e.start_time_ms, "end_time_ms": e.end_time_ms,
-             "source": e.source, "confidence": e.confidence, "review_status": e.review_status}
-            for e in events
-        ]
-        row = {field: str(extra.get(field, "")) for field in KNOWN_COLUMNS if field not in ("sample_id", "video_path", "person_count", "person_identity_attributes", "events")}
-        row.update({
-            "sample_id": sample.sample_id,
-            "video_path": sample.relative_path,
-            "person_count": str(len(people)),
-            "person_identity_attributes": json.dumps(person_json, ensure_ascii=False, separators=(",", ":")),
-            "events": json.dumps(event_json, ensure_ascii=False, separators=(",", ":")),
-        })
-        row.update({key: str(extra.get(key, "")) for key in unknown})
-        rows.append(row)
+        if isinstance(extra, dict):
+            unknown.update(str(key) for key in extra if key not in KNOWN_COLUMNS and key != "person_tag_list")
     columns = list(KNOWN_COLUMNS) + sorted(unknown)
+
+    def rows() -> Iterator[dict[str, str]]:
+        for processed, sample in enumerate(samples, start=1):
+            if cancel is not None and cancel():
+                raise CancellationError("CSV export cancelled")
+            row_db = store.connection().execute("SELECT extra_json FROM samples WHERE sample_id = ?", (sample.sample_id,)).fetchone()
+            try:
+                extra = json.loads(row_db[0] or "{}") if row_db else {}
+            except json.JSONDecodeError:
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            people = store.get_persons(sample.sample_id)
+            events = store.get_events(sample.sample_id)
+            person_json = [{"person_id": p.person_id, "age_group": p.age_group, "face_familiarity": p.face_familiarity,
+                            "body_reid_familiarity": p.body_reid_familiarity, **({"track_id": p.track_id} if p.track_id else {})}
+                           for p in people]
+            event_json = [{"event_type": e.event_type, "start_time_ms": e.start_time_ms, "end_time_ms": e.end_time_ms,
+                           "source": e.source, "confidence": e.confidence, "review_status": e.review_status}
+                          for e in events]
+            row = {field: str(extra.get(field, "")) for field in KNOWN_COLUMNS if field not in ("sample_id", "video_path", "person_count", "person_identity_attributes", "events")}
+            row.update({"sample_id": sample.sample_id, "video_path": sample.relative_path, "person_count": str(len(people)),
+                        "person_identity_attributes": json.dumps(person_json, ensure_ascii=False, separators=(",", ":")),
+                        "events": json.dumps(event_json, ensure_ascii=False, separators=(",", ":"))})
+            row.update({key: str(extra.get(key, "")) for key in unknown})
+            if progress is not None:
+                progress(processed)
+            yield row
+
     backup_path = None
     with FileLock(path.with_name(path.name + ".lock")):
         backup_path = _backup(path)
-        _atomic_write(path, lambda handle: _write_rows(handle, columns, rows), bom=True)
+        _atomic_write(path, lambda handle: _write_rows(handle, columns, rows()), bom=True)
         meta_path = path.with_name(path.name + ".meta.json")
         max_revision = max((sample.revision for sample in samples), default=0)
-        metadata = {"schema_version": CURRENT_SCHEMA_VERSION, "exported_at": utc_now(), "database_revision": max_revision, "sample_count": len(rows)}
+        metadata = {"schema_version": CURRENT_SCHEMA_VERSION, "exported_at": utc_now(), "database_revision": max_revision, "sample_count": len(samples)}
         _atomic_write(meta_path, lambda handle: json.dump(metadata, handle, ensure_ascii=False, indent=2))
-    return ExportReport(path=path, sample_count=len(rows), backup_path=backup_path, meta_path=meta_path)
+    return ExportReport(path=path, sample_count=len(samples), backup_path=backup_path, meta_path=meta_path)
 
 
-def _write_rows(handle, columns: list[str], rows: list[dict[str, str]]) -> None:
+def _write_rows(handle, columns: list[str], rows: Iterable[dict[str, str]]) -> None:
     writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
     writer.writeheader()
     writer.writerows(rows)
 
 
-__all__ = ["ExportReport", "ImportError", "ImportReport", "KNOWN_COLUMNS", "child_id", "export_csv", "import_csv", "sample_id_for_path"]
+__all__ = ["CancellationError", "ExportReport", "ImportError", "ImportReport", "KNOWN_COLUMNS", "child_id", "export_csv", "import_csv", "sample_id_for_path"]
