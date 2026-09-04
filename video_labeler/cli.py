@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .maintenance import backup_database, check_database
+from .media_index import index_media
 from .quality import dataset_stats, export_jsonl, validate_dataset
 from .storage.csv_adapter import export_csv, import_csv
 from .storage.sqlite_store import SQLiteStore
@@ -20,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate"); validate.add_argument("--db", required=True, type=Path); validate.add_argument("--mode", choices=("draft", "strict"), default="draft")
     stats = commands.add_parser("stats"); stats.add_argument("--db", required=True, type=Path)
     export = commands.add_parser("export"); export.add_argument("--db", required=True, type=Path); export.add_argument("--format", choices=("jsonl",), required=True); export.add_argument("--output", "--path", "--csv", dest="output", required=True, type=Path); export.add_argument("--manifest", type=Path); export.add_argument("--split-seed", default="video-labeler-v1")
+    index = commands.add_parser("index-media"); index.add_argument("--db", required=True, type=Path); index.add_argument("--video-root", required=True, type=Path); index.add_argument("--ffprobe", type=Path)
     backup = commands.add_parser("backup-db"); backup.add_argument("--db", required=True, type=Path); backup.add_argument("--output", required=True, type=Path)
     commands.add_parser("check-db").add_argument("--db", required=True, type=Path)
     return parser
@@ -44,6 +46,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "stats":
             print(json.dumps(dataset_stats(store), ensure_ascii=False, sort_keys=True))
             return 0
+        if args.command == "index-media":
+            report = index_media(args.video_root, store, ffprobe_path=args.ffprobe)
+            print(json.dumps({"scanned": report.scanned, "indexed": report.indexed, "skipped": report.skipped, "errors": report.errors}, ensure_ascii=False))
+            return 1 if report.errors else 0
         if args.command == "backup-db":
             output = backup_database(store, args.output)
             print(json.dumps({"path": str(output)}, ensure_ascii=False))

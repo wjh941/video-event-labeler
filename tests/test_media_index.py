@@ -1,4 +1,6 @@
 from video_labeler.media_index import index_media
+from video_labeler.cli import main
+import json
 
 
 def test_index_media_discovers_hashes_probes_and_is_idempotent(tmp_path, store):
@@ -30,3 +32,14 @@ def test_index_media_ignores_escaping_symlink(tmp_path, store):
     report = index_media(tmp_path, store)
     assert report.scanned == 0
     assert store.list_samples(10, 0) == []
+
+
+def test_cli_index_media_reports_scan(tmp_path, capsys):
+    (tmp_path / "clip.mp4").write_bytes(b"clip")
+    database = tmp_path / "dataset.db"
+
+    assert main(["index-media", "--db", str(database), "--video-root", str(tmp_path)]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scanned"] == 1
+    assert payload["indexed"] == 1
