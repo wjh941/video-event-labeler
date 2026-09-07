@@ -3,6 +3,7 @@ import json
 import pytest
 
 from video_labeler.domain import Event, Person, Prediction, Sample
+from video_labeler.providers import MockAnnotationProvider
 from video_labeler.services import AnnotationService
 
 
@@ -51,6 +52,17 @@ def test_service_lists_prediction_records_with_filters(tmp_path, store):
     assert records[0]["label"] == {"value": "p1"}
     assert records[0]["review_status"] == "draft"
     assert records[0]["sample_revision"] == 0
+
+
+def test_mock_provider_predictions_can_be_persisted_without_unresolved_evidence(tmp_path, store):
+    store.upsert_dataset("d", str(tmp_path))
+    store.upsert_sample(Sample(sample_id="s1", dataset_id="d", relative_path="s1.mp4"))
+
+    predictions = AnnotationService(store, tmp_path, MockAnnotationProvider()).predict("s1")
+
+    assert len(predictions) == 1
+    assert predictions[0].evidence_ids == ()
+    assert store.get_prediction(predictions[0].prediction_id) == predictions[0]
 
 
 def test_service_quality_snapshot_has_stats_and_report(tmp_path, store):

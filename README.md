@@ -2,7 +2,43 @@
 
 SQLite platform commands, schema details, and a reproducible synthetic demo are documented in `docs/architecture.md`, `docs/data-model.md`, and `docs/demo_dataset/README.md`. The current database schema is version 3.
 
-本仓库提供一套本地视频标注工具：先从视频目录生成行为事件 CSV，再使用同一份 CSV 标注人物身份属性。工具只使用 Python 标准库，不需要安装第三方 Python 包。SQLite 是正式数据源，CSV 用于兼容导入和导出。
+本仓库提供一套本地优先的视频事件与人物属性标注平台：从视频目录递归建库，自动生成可人工确认的行为预标注，再由审核者补充事件时间和人物身份属性，最后导出 CSV 或 JSONL 数据集。SQLite 是正式数据源，CSV 是兼容导入/导出边界；运行时只依赖 Python 标准库。
+
+> 项目状态：`feature/production-hardening` 已形成可独立运行的单机标注闭环，具备数据校验、并发冲突保护、审计恢复、预测审核、质量检查、备份和跨平台 CI，已经达到面试项目展示和实际小规模本地数据标注的要求。
+
+## 功能概览
+
+| 能力 | 已实现内容 |
+| --- | --- |
+| 数据导入 | 递归扫描 `.mp4`、`.avi`、`.mov`、`.mkv`、`.webm`、`.m4v`；按目录/文件名生成行为草稿；SHA-256 媒体索引 |
+| 行为标注 | 多事件时间段、毫秒级起止时间、正负样本规则、循环播放、键盘导航、自定义行为标签 |
+| 人物标注 | 人数、唯一 `person_id`、年龄段、人脸熟悉度、体态熟悉度；事件片段只读回看 |
+| 存储可靠性 | SQLite 事务、WAL 兼容备份、文件锁、乐观修订号、外部修改/过期页面冲突检测、原子导出 |
+| 审核协作 | 分页、搜索、审核状态筛选、草稿自动恢复、审核并下一条、逐样本审计历史与版本恢复 |
+| 模型闭环 | 预测记录、模型版本/置信度/证据引用、接受/拒绝决策；`AnnotationProvider` 可接入真实模型，内置 `MockAnnotationProvider` 方便演示 |
+| 质量与导出 | 草稿/严格质量模式、媒体失效/事件越界/重复人员检查、统计面板、CSV 兼容导出、确定性 JSONL 和 train/validation/test 划分 |
+| 工程质量 | 109 个自动化测试、Ruff、Mypy、Python 3.11 的 Windows/Linux CI、路径穿越防护和 HTTP 断点续传 |
+
+## 端到端流程
+
+```mermaid
+flowchart TD
+    A[视频根目录] --> B[递归扫描与 SHA-256 媒体索引]
+    B --> C{SQLite 权威数据源}
+    C --> D[行为预标注与事件时间段审核]
+    D --> E[保存草稿 / 审核并下一条]
+    E --> F[人物身份属性标注]
+    F --> G[预测接受或拒绝]
+    G --> H[质量检查与统计面板]
+    H --> I[CSV 兼容导出 / JSONL 数据集导出]
+    I --> J[训练、分析或下游系统]
+    C -. 事务、备份、审计、修订 .-> K[(可恢复历史)]
+    D -. 浏览器草稿恢复 .-> D
+    F -. 浏览器草稿恢复 .-> F
+    H -. 严格模式阻止不完整数据 .-> H
+```
+
+SQLite 模式下，两个浏览器页面都通过本地 HTTP 接口访问同一个数据库；CSV 模式保留旧项目的兼容工作流。视频只在配置的 `--video-root` 下读取，所有媒体路径都会经过安全解析。
 
 ## 环境
 
@@ -169,6 +205,15 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 
 人物页面不会改写事件字段；如果需要调整行为或时间，请回到 `video_event_labeler.py`。
 
+## 项目边界与可选增强
+
+核心的本地单机标注、审核、恢复和导出能力已经完成。以下方向可以作为下一阶段迭代，但不影响当前作为面试项目或小规模本地数据标注工具使用：
+
+- **真实模型接入**：实现 `AnnotationProvider`，并在预测生成时同时写入 `EvidenceService` 生成的证据记录；当前内置 provider 只用于可重复的演示预测。
+- **浏览器端到端测试**：现有测试覆盖 HTTP 工作流、页面契约和数据层；若需要进一步展示 UI 质量，可增加 Playwright 的真实浏览器回归。
+- **团队化部署**：当前服务绑定本机回环地址，适合单机使用；多用户部署需要认证、权限、任务分配和集中式数据库。
+- **发布体验**：可以补充 `console_scripts` 入口、Windows 打包产物和示例数据下载，但不属于标注核心闭环。
+
 ## SQLite 维护与导出
 
 ```powershell
@@ -216,8 +261,6 @@ python -m pytest -q
 ruff check video_labeler
 mypy video_labeler --exclude 'video_labeler/(storage|services|quality)'
 ```
-
-## SQLite compatibility adapter
 
 ## 大数据集审核、预测与质量面板
 
