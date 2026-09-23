@@ -45,7 +45,7 @@ video files ──> CSV import ──> SQLiteStore ──> AnnotationService ─
 | 组件 | 端口 | 作用 |
 | --- | --- | --- |
 | `video_event_labeler.py` | 默认 8765 | 行为与事件时间标注页（标准库 `http.server`，本地 127.0.0.1） |
-| `person_identity_labeler.py` | 默认起始 8865，被占用自动后延最多 20 个 | 人物身份属性标注页 |
+| `person_identity_labeler.py` | 默认起始 8765（组合启动器传入 8865），被占用自动后延最多 20 个 | 人物身份属性标注页 |
 | `run_video_annotation.py` | 8765 → 8865 | 两阶段组合启动器 |
 | `python -m video_labeler` | — | 命令行：CSV 导入/导出、校验、统计、JSONL 导出 |
 
