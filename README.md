@@ -1,18 +1,37 @@
 # 视频事件标注工具（Video Event Labeler）
 
-面向本地视频数据集的两阶段网页标注工具：先把一个视频目录递归整理成清单 CSV 并标注行为事件与毫秒级时间段，再用同一份 CSV 标注人物身份属性。标注人员与质检人员在 Windows 上本地使用，无需部署、无第三方 Python 依赖；SQLite 是内部数据源，CSV/JSONL 是对外交换格式。
+面向本地视频数据集的两阶段网页标注工具：先把一个视频目录递归整理成清单 CSV 并标注行为事件与毫秒级时间段，再用同一份 CSV 标注人物身份属性。
 
-## 功能特性
+标注人员与质检人员在 Windows 上本地使用，无需部署、无第三方 Python 依赖。SQLite 是内部数据源，CSV/JSONL 是对外交换格式。
 
-- 递归扫描视频目录（`.mp4`、`.avi`、`.mov`、`.mkv`、`.webm`、`.m4v`），生成并增量维护 `video_labeler_manifest.csv`，已有人工标注保留、新视频追加。
-- 按目录名和文件名预填草稿标签：`pos`/`neg` 分层；`neg` 预填 `normal_scene`；目录路径推断光照（白天、黑夜、红外）；中文/英文关键词映射到 12 个固定行为标签，也支持 1–64 字符的自定义标签。预填只是草稿，必须人工确认。
-- 行为标注网页：截取开始/结束时刻（毫秒级，`H:MM:SS.mmm` 显示）、循环片段复查、保存草稿、审核并下一条；`normal_scene` 不得与正例行为混用，正例审核必须有完整且合法的时间段。
-- 人物标注网页：填写人员数量与每人唯一编号、年龄段、人脸熟悉度、体态熟悉度（枚举校验）；按 CSV 行自动切换原视频；事件卡片只读回看，可播放事件片段；只写人物字段，不改写事件。
-- 组合启动器 `run_video_annotation.py`：行为阶段结束后按 `Ctrl+C` 自动衔接人物阶段。
-- SQLite 存储（schema 版本 3，含 datasets、samples、media_assets、events、persons、evidence、model_predictions、annotation_revisions 八张表），事务写入、WAL、乐观 revision 冲突检测。
-- CSV 兼容导入/导出：确定性样本/事件/人员 ID、未知列保存在 `samples.extra_json`、迁移时丢弃旧 `person_tag_list`、源视频变更或缺失报 `stale` 且不动已有标注、原子写入加时间戳备份和 `.meta.json` 元数据。
-- 质量命令行：跨表一致性校验、数据集统计、逐样本 JSONL 导出（含 provenance 与修订记录）。
-- 媒体路径安全：拒绝逃逸视频根目录及符号链接切换；可选 ffprobe 读取时长/分辨率/帧率，缺失时安全降级。
+**目录**：[亮点](#亮点) · [标注工作流](#标注工作流) · [组成](#组成) · [快速开始](#快速开始) · [配置与参数](#配置与参数) · [推荐目录结构](#推荐目录结构) · [CSV 字段](#csv-字段) · [人员属性格式](#人员属性格式) · [标注流程](#标注流程) · [数据安全与恢复](#数据安全与恢复) · [常见问题](#常见问题) · [已知边界](#已知边界) · [开发与测试](#开发与测试) · [文档](#文档)
+
+## 亮点
+
+| 能力 | 说明 |
+| --- | --- |
+| 两阶段网页标注 | 行为事件（毫秒级时间段）与人物身份属性分页完成，组合启动器在行为阶段结束后按 `Ctrl+C` 自动衔接人物阶段 |
+| 增量清单扫描 | 递归扫描 `.mp4`、`.avi`、`.mov`、`.mkv`、`.webm`、`.m4v`，生成并增量维护 `video_labeler_manifest.csv`；已有人工标注保留，新视频追加 |
+| 标签预填 | 按目录名/文件名推断 `pos`/`neg` 分层与光照（白天、黑夜、红外），中英文关键词映射到 12 个固定行为标签，也支持 1–64 字符自定义标签；预填只是草稿，必须人工确认 |
+| 行为标注页 | 截取开始/结束时刻（毫秒级，`H:MM:SS.mmm` 显示）、循环片段复查、保存草稿、审核并下一条；`normal_scene` 不得与正例行为混用，正例审核必须有完整且合法的时间段 |
+| 人物标注页 | 填写人员数量与每人唯一编号、年龄段、人脸熟悉度、体态熟悉度（枚举校验）；按 CSV 行自动切换原视频，事件卡片只读回看、可播放事件片段；只写人物字段，不改写事件 |
+| SQLite 存储 | schema 版本 3，含 datasets、samples、media_assets、events、persons、evidence、model_predictions、annotation_revisions 八张表；事务写入、WAL、乐观 revision 冲突检测 |
+| CSV 兼容导入/导出 | 确定性样本/事件/人员 ID；未知列保存在 `samples.extra_json`；迁移时丢弃旧 `person_tag_list`；源视频变更或缺失报 `stale` 且不动已有标注；原子写入加时间戳备份和 `.meta.json` 元数据 |
+| 质量命令行 | 跨表一致性校验、数据集统计、逐样本 JSONL 导出（含 provenance 与修订记录） |
+| 媒体路径安全 | 拒绝逃逸视频根目录及符号链接切换；可选 ffprobe 读取时长/分辨率/帧率，缺失时安全降级 |
+
+## 标注工作流
+
+```mermaid
+flowchart LR
+    A["启动脚本"] --> B["选择视频目录<br/>或导入已有 CSV"]
+    B --> C["生成 / 更新清单<br/>video_labeler_manifest.csv"]
+    C --> D["行为阶段<br/>播放并截取毫秒级时间段"]
+    D -->|Ctrl+C 衔接| E["人物阶段<br/>填写人员身份属性"]
+    E --> F["保存 CSV<br/>自动时间戳备份"]
+    F --> G["质检<br/>validate / stats"]
+    G --> H["导出<br/>CSV / JSONL"]
+```
 
 ## 组成
 
@@ -21,11 +40,17 @@ video files ──> CSV import ──> SQLiteStore ──> AnnotationService ─
                                      └────────> quality/stats ──> CSV / JSONL 导出
 ```
 
+| 组件 | 端口 | 作用 |
+| --- | --- | --- |
+| `video_event_labeler.py` | 默认 8765 | 行为与事件时间标注页（标准库 `http.server`，本地 127.0.0.1） |
+| `person_identity_labeler.py` | 默认起始 8865，被占用自动后延最多 20 个 | 人物身份属性标注页 |
+| `run_video_annotation.py` | 8765 → 8865 | 两阶段组合启动器 |
+| `python -m video_labeler` | — | 命令行：CSV 导入/导出、校验、统计、JSONL 导出 |
+
+内部模块：
+
 | 模块 | 职责 |
 | --- | --- |
-| `video_event_labeler.py` | 行为与事件时间标注页（标准库 `http.server`，本地 127.0.0.1） |
-| `person_identity_labeler.py` | 人物身份属性标注页 |
-| `run_video_annotation.py` | 两阶段组合启动器 |
 | `video_labeler/domain.py` | 经校验的不可变领域记录（Sample/Event/Person 等） |
 | `video_labeler/storage/` | SQLite 事务仓库（`sqlite_store`）、schema 迁移、CSV 兼容适配、文件锁 |
 | `video_labeler/services.py` | 面向两个标注页的行投影与事件/人员保存 |
@@ -35,7 +60,7 @@ video files ──> CSV import ──> SQLiteStore ──> AnnotationService ─
 
 ## 快速开始
 
-环境要求：Python 3.10 或更高（CI 验证基线为 3.11）、Windows；ffprobe 可选。
+环境要求：**Python 3.10 或更高**（CI 验证基线为 3.11）、Windows；ffprobe 可选。
 
 运行标注页无需安装任何第三方包；开发工具链可选安装：
 
@@ -87,15 +112,48 @@ python -m video_labeler stats --db dataset.db
 python -m video_labeler export --db dataset.db --format jsonl --output train.jsonl
 ```
 
-`validate` 输出 JSON 质量报告，存在错误时退出码为 1；`stats` 输出各状态样本数、事件/人员计数与完成率等聚合值；`export` 每个样本写一条含媒体、事件、人员、provenance 与修订记录的 JSONL。`docs/demo_dataset/README.md` 提供一份不提交媒体的合成数据演示。
+- `validate` 输出 JSON 质量报告，存在错误时退出码为 1。
+- `stats` 输出各状态样本数、事件/人员计数与完成率等聚合值。
+- `export` 每个样本写一条含媒体、事件、人员、provenance 与修订记录的 JSONL。
+
+`docs/demo_dataset/README.md` 提供一份不提交媒体的合成数据演示。
 
 ## 配置与参数
 
-组合启动器 `run_video_annotation.py`：`--video-root`（必填）、`--csv`（必须位于视频根目录下，默认 `<video-root>\video_labeler_manifest.csv`）、`--person-only`、`--no-browser`、`--event-port`（默认 8765）、`--person-port`（默认 8865）、`--db`（指定 SQLite 数据库）。
+**`run_video_annotation.py`（组合启动器）**
 
-`video_event_labeler.py`：`--video-root`、`--csv`、`--port`（默认 8765，范围 1–65535）、`--db`。未提供 `--video-root` 且无 `--csv` 时进入空页面，可在页面上导入目录。
+| 参数 | 说明 |
+| --- | --- |
+| `--video-root` | 必填，视频根目录 |
+| `--csv` | 必须位于视频根目录下，默认 `<video-root>\video_labeler_manifest.csv` |
+| `--person-only` | 跳过行为阶段，只启动人物标注 |
+| `--no-browser` | 不自动打开浏览器 |
+| `--event-port` | 行为标注端口，默认 8765 |
+| `--person-port` | 人物标注端口，默认 8865 |
+| `--db` | 指定 SQLite 数据库 |
 
-`person_identity_labeler.py`：`--video-root`、`--csv`、`--video`（兼容单视频 CSV）、`--host`（默认 127.0.0.1）、`--port`（起始端口，被占用时自动向后尝试最多 20 个）、`--no-browser`、`--db`。
+**`video_event_labeler.py`（行为标注页）**
+
+| 参数 | 说明 |
+| --- | --- |
+| `--video-root` | 视频根目录 |
+| `--csv` | 清单 CSV 路径 |
+| `--port` | 服务端口，默认 8765，范围 1–65535 |
+| `--db` | 指定 SQLite 数据库 |
+
+未提供 `--video-root` 且无 `--csv` 时进入空页面，可在页面上导入目录。
+
+**`person_identity_labeler.py`（人物标注页）**
+
+| 参数 | 说明 |
+| --- | --- |
+| `--video-root` | 视频根目录 |
+| `--csv` | 清单 CSV 路径 |
+| `--video` | 兼容单视频 CSV |
+| `--host` | 监听地址，默认 127.0.0.1 |
+| `--port` | 起始端口，被占用时自动向后尝试最多 20 个 |
+| `--no-browser` | 不自动打开浏览器 |
+| `--db` | 指定 SQLite 数据库 |
 
 ## 推荐目录结构
 
@@ -110,11 +168,13 @@ D:\videos\
 └─ video_labeler_manifest.csv
 ```
 
-目录名和文件名中的行为关键词会用于预填行为标签；`neg` 优先于文件名中的事件词，负例预填 `normal_scene`。预填结果只是草稿，必须人工确认后才能审核。
+- 目录名和文件名中的**行为关键词**会用于预填行为标签。
+- `neg` 优先于文件名中的事件词，负例预填 `normal_scene`。
+- 预填结果只是草稿，必须人工确认后才能审核。
 
 ## CSV 字段
 
-新清单使用 UTF-8 with BOM 编码，字段顺序为：
+新清单使用 **UTF-8 with BOM** 编码，字段顺序为：
 
 ```text
 sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,security_zone_points,person_count,person_identity_attributes,events
@@ -150,17 +210,19 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 ]
 ```
 
-可选值：
+| 字段 | 可选值 |
+| --- | --- |
+| `person_id` | 人员编号，每一行必须唯一 |
+| `age_group` | `child`、`adult`、`elderly`、`unknown` |
+| `face_familiarity` | `familiar`、`stranger`、`unknown`、`not_visible` |
+| `body_reid_familiarity` | `familiar`、`stranger`、`unknown`、`not_visible` |
 
-- `age_group`: `child`、`adult`、`elderly`、`unknown`
-- `face_familiarity`: `familiar`、`stranger`、`unknown`、`not_visible`
-- `body_reid_familiarity`: `familiar`、`stranger`、`unknown`、`not_visible`
-
-每行人员编号必须唯一。人员数为 0 时保存为空数组 `[]`。人脸或体态无法判断时使用 `unknown` 或 `not_visible`，不要编造身份。
+- 人员数为 0 时保存为空数组 `[]`。
+- 人脸或体态无法判断时使用 `unknown` 或 `not_visible`，不要编造身份。
 
 ## 标注流程
 
-行为阶段：
+**行为阶段：**
 
 1. 选择左侧记录。
 2. 在视频播放器中定位事件开始位置，点击事件卡片的“截取”。
@@ -170,7 +232,7 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 
 正例事件审核时必须填写合法的开始和结束时间，且结束时间晚于开始时间。`normal_scene` 可以没有时间段，不能和正例行为混用。
 
-人物阶段：
+**人物阶段：**
 
 1. 选择当前 CSV 记录，确认页面已经切换到对应原视频。
 2. 填写人员数量；`0` 表示画面中没有需要标注的人员。
@@ -182,12 +244,16 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 
 ## 数据安全与恢复
 
-- 行为脚本首次修改已有 CSV 前，会在同目录 `event_labeler_backups\` 下创建时间戳备份；检测到 CSV 被外部修改时拒绝保存并提示刷新，不会覆盖外部改动。
-- CSV 导出前写同目录 `.before_export_<UTC时间戳>` 备份，并生成 `<csv>.meta.json`（schema 版本、UTC 导出时间、数据库 revision、样本数）；写入使用临时文件加原子替换，配合 `.lock` 文件锁。
-- 数据库写入为事务式，样本带乐观 revision；过期修订写入会得到冲突错误，需重新加载后重试。
-- 从旧 CSV 迁移时补齐 `person_count`、`person_identity_attributes`，并移除旧的 `person_tag_list`。
+| 保护机制 | 说明 |
+| --- | --- |
+| 修改前备份 | 行为脚本首次修改已有 CSV 前，在同目录 `event_labeler_backups\` 下创建时间戳备份 |
+| 外部修改检测 | 检测到 CSV 被外部修改时拒绝保存并提示刷新，不会覆盖外部改动 |
+| 导出前备份 | CSV 导出前写同目录 `.before_export_<UTC时间戳>` 备份，并生成 `<csv>.meta.json`（schema 版本、UTC 导出时间、数据库 revision、样本数） |
+| 原子写入 | 写入使用临时文件加原子替换，配合 `.lock` 文件锁 |
+| 事务与乐观锁 | 数据库写入为事务式，样本带乐观 revision；过期修订写入会得到冲突错误，需重新加载后重试 |
+| 旧格式迁移 | 从旧 CSV 迁移时补齐 `person_count`、`person_identity_attributes`，并移除旧的 `person_tag_list` |
 
-恢复方式：关闭标注服务，把备份文件复制回原 CSV 文件名，然后重新启动脚本。
+**恢复方式**：关闭标注服务，把备份文件复制回原 CSV 文件名，然后重新启动脚本。
 
 ## 常见问题
 
@@ -223,7 +289,9 @@ python -m ruff check video_labeler
 python -m mypy video_labeler --exclude 'video_labeler/(storage|services|quality)'
 ```
 
-GitHub Actions 在 Ubuntu 与 Windows（Python 3.11）上运行编译检查、ruff、mypy 和 pytest；根目录标注脚本与 `old/` 归档不在 ruff/mypy 范围内（见 `pyproject.toml`）。变更记录见 `CHANGELOG.md`（当前版本 0.2.0）。
+GitHub Actions 在 Ubuntu 与 Windows（Python 3.11）上运行编译检查、ruff、mypy 和 pytest；根目录标注脚本与 `old/` 归档不在 ruff/mypy 范围内（见 `pyproject.toml`）。
+
+变更记录见 `CHANGELOG.md`（当前版本 0.2.0）。
 
 ## 文档
 
