@@ -1,5 +1,7 @@
 # 视频事件标注工具（Video Event Labeler）
 
+[![CI](https://img.shields.io/github/actions/workflow/status/wjh941/video-event-labeler/ci.yml?branch=main&label=CI)](https://github.com/wjh941/video-event-labeler/actions/workflows/ci.yml) [![python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml) [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml) [![platform](https://img.shields.io/badge/platform-Windows-blue)]
+
 面向本地视频数据集的两阶段网页标注工具：先把一个视频目录递归整理成清单 CSV 并标注行为事件与毫秒级时间段，再用同一份 CSV 标注人物身份属性。
 
 标注人员与质检人员在 Windows 上本地使用，无需部署、无第三方 Python 依赖。SQLite 是内部数据源，CSV/JSONL 是对外交换格式。
@@ -57,6 +59,61 @@ video files ──> CSV import ──> SQLiteStore ──> AnnotationService ─
 | `video_labeler/quality.py` | 校验、统计、JSONL 导出 |
 | `video_labeler/media.py` | 视频发现、SHA-256、路径安全校验、可选 ffprobe 探测 |
 | `old/` | 归档的旧版单脚本，不参与运行 |
+
+## 内部逻辑
+
+### 目录结构与职责
+
+```text
+video-event-labeler/
+├─ video_event_labeler.py      # 行为事件标注页：清单扫描、HTTP 服务、毫秒级事件编辑与审核
+├─ person_identity_labeler.py  # 人物属性标注页：按 CSV 行切换视频，只写人员字段
+├─ run_video_annotation.py     # 两阶段组合启动器：扫描 → 行为 8765 → Ctrl+C → 人物 8865
+├─ pyproject.toml              # 包元数据：Python >=3.10、零第三方运行依赖与开发工具链
+├─ video_labeler/
+│  ├─ domain.py                # 经校验的不可变领域记录（Sample/Event/Person 等）
+│  ├─ schema.py                # schema 版本 3 与幂等迁移：八张表 + schema_migrations
+│  ├─ services.py              # 行投影与事件/人员保存，封装乐观 revision
+│  ├─ quality.py               # 跨表校验、统计与含修订记录的 JSONL 导出
+│  ├─ media.py                 # 视频发现、SHA-256、路径安全校验、可选 ffprobe
+│  ├─ evidence.py              # evidence 表的多模态证据持久化
+│  ├─ providers.py             # 模型预测协议与确定性 Mock 实现
+│  ├─ cli.py                   # python -m video_labeler 五个子命令的入口
+│  └─ storage/
+│     ├─ sqlite_store.py       # 单连接事务仓库：WAL、BEGIN IMMEDIATE、乐观 revision
+│     ├─ csv_adapter.py        # CSV 导入导出、确定性 ID、stale 检测、原子写入与备份
+│     └─ file_lock.py          # 跨进程文件锁，保护迁移与导出临界区
+├─ tests/                      # pytest 套件：schema、store、csv、服务、故障恢复、性能等
+├─ old/                        # 归档的旧版单脚本，不参与运行
+├─ .github/workflows/ci.yml    # CI：Ubuntu 与 Windows 双平台，Python 3.11
+└─ docs/                       # 架构、数据模型、演示数据集与设计文档
+```
+
+### 模块与数据流
+
+```mermaid
+flowchart LR
+    VID["原视频文件<br/>mp4 / avi / mov / mkv / webm / m4v"]
+    CSV["video_labeler_manifest.csv"]
+    DB["SQLite dataset.db · samples 为锚点<br/>datasets · media_assets · events · persons<br/>evidence · model_predictions · annotation_revisions"]
+    VID -->|"import_video_directory 递归增量扫描"| CSV
+    VID -->|"media.py 校验路径并计算 SHA-256<br/>可选 ffprobe 写 media_assets"| DB
+    CSV -->|"import_csv 逐行导入<br/>未知列存 samples.extra_json"| DB
+    VID -->|"http.server 按 video_path 提供视频流"| P1["行为事件页 · 默认端口 8765"]
+    P1 -->|"save_events 保存毫秒级事件"| SVC["AnnotationService<br/>video_labeler/services.py"]
+    P2["人物属性页 · 启动器默认端口 8865<br/>按 video_path 切换播放原视频"] -->|"save_people 只写人员字段"| SVC
+    SVC -->|"replace_events / replace_persons<br/>先比对 expected_revision"| DB
+    DB -->|"export-csv 原子写回<br/>先备份再生成 .meta.json"| CSV
+    DB -->|"quality.py validate / stats / export jsonl"| OUT["JSONL 与质量报告"]
+```
+
+### 关键机制
+
+- **WAL + 乐观 revision 防并发覆盖**：`SQLiteStore` 连接设置 `PRAGMA journal_mode = WAL`、`synchronous = FULL`、`busy_timeout = 5000`；`replace_events` / `replace_persons` 在 `BEGIN IMMEDIATE` 事务内先比对 `samples.revision`，与传入的 `expected_revision` 不符即抛 `ConflictError`，写入成功后 revision 自增（`video_labeler/storage/sqlite_store.py`）。
+- **增量扫描保留人工标注**：`import_video_directory` 只为清单中不存在的新视频追加行，已有行原样保留；`import_csv` 对内容未变的行计 `skipped`，对 SHA-256 变化或视频缺失的行计 `stale` 并直接跳过，不改写库内 events/persons（`video_event_labeler.py`、`video_labeler/storage/csv_adapter.py`）。
+- **两级 stale 检测**：页面保存请求携带数据集快照哈希 `csv_revision`，与当前快照不符即拒绝保存并要求刷新；数据库侧再以乐观 revision 兜底（`video_event_labeler.py` 与 `person_identity_labeler.py` 的保存处理、`video_labeler/services.py` 的 `save_events` / `save_people`）。触发时机：CSV 或数据库被外部修改后再次保存。
+- **原子写入与备份**：CSV 写出先落临时文件再 `os.replace` 并 fsync；导出前在同目录生成 `.before_export_<UTC时间戳>` 备份与 `.meta.json`（schema 版本、数据库 revision、样本数）；行为页首次修改已有 CSV 前也创建时间戳备份（`csv_adapter.py` 的 `_atomic_write` / `export_csv`、`video_event_labeler.py` 的 `write_csv_atomic`）。
+- **文件锁保护临界区**：schema 迁移与 CSV 导入/导出均持有 `.lock` 文件锁互斥，避免并发进程交叉写入（`video_labeler/storage/file_lock.py` 及其在 `sqlite_store.py`、`csv_adapter.py` 的调用点）。
 
 ## 快速开始
 
