@@ -26,6 +26,7 @@ from video_labeler.hashing import sha256_file as _sha256_file
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
 from video_labeler.storage.sqlite_store import SQLiteStore
+from video_labeler.timeutil import format_time_text, parse_time_text
 from video_labeler.web_common import CsvConflictError
 
 
@@ -72,7 +73,6 @@ BEHAVIOR_CLASSES = {
     "normal_scene": "正常场景",
 }
 
-TIME_PATTERN = re.compile(r"(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)")
 NEGATIVE_MARKER = re.compile(r"(?:^|[/\\\-_+\s.])neg(?=$|[/\\\-_+\s.])")
 EVENT_PATTERN = re.compile(
     r'"event_type"\s*:\s*"([^"]+)"\s*,\s*'
@@ -146,32 +146,6 @@ def infer_lighting(relative_path: Path) -> str:
     if "night_black_white" in text:
         return "红外"
     return "黑夜" if "night" in text else ""
-
-
-def parse_time_text(value: str) -> int | None:
-    """Convert H:MM:SS[.sss] text to milliseconds."""
-    text = (value or "").strip().lower()
-    if text in ("", "null"):
-        return None
-    match = TIME_PATTERN.fullmatch(text)
-    if not match:
-        raise ValueError("time must use H:MM:SS or H:MM:SS.sss")
-    hours, minutes, seconds = match.groups()
-    if int(minutes) >= 60 or float(seconds) >= 60:
-        raise ValueError("time has an invalid minute or second value")
-    return int(round((int(hours) * 3600 + int(minutes) * 60 + float(seconds)) * 1000))
-
-
-def format_time_text(value: int | None) -> str:
-    """Format milliseconds as fixed-width H:MM:SS.mmm."""
-    if value is None:
-        return ""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError("milliseconds must be a non-negative integer or null")
-    total_seconds, milliseconds = divmod(value, 1000)
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
 
 def is_valid_custom_label(label: str) -> bool:
