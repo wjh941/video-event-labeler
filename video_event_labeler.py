@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from video_labeler.hashing import sha256_file as _sha256_file
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
 from video_labeler.storage.sqlite_store import SQLiteStore
@@ -460,14 +461,6 @@ def _fsync_directory(path: Path) -> None:
             return
     finally:
         os.close(directory_fd)
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(VIDEO_READ_CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def write_csv_atomic(

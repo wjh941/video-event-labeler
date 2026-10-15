@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..domain import Event, Person, Sample, utc_now
+from ..hashing import sha256_file as _stream_sha256
 from ..schema import CURRENT_SCHEMA_VERSION
 from .file_lock import FileLock
 from .sqlite_store import SQLiteStore, StorageError
@@ -28,7 +29,6 @@ KNOWN_COLUMNS = (
     "behavior_id", "security_zone_points", "person_count",
     "person_identity_attributes", "events",
 )
-_HASH_CHUNK_SIZE = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -91,11 +91,7 @@ def child_id(sample_id: str, kind: str, ordinal: int) -> str:
 def _sha256_file(path: Path) -> str | None:
     if not path.is_file():
         return None
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(_HASH_CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return _stream_sha256(path)
 
 
 def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:

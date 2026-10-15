@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import subprocess
@@ -10,6 +9,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
+
+from .hashing import sha256_file as _stream_sha256
 
 SUPPORTED_VIDEO_EXTENSIONS = frozenset({".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"})
 
@@ -91,11 +92,7 @@ def iter_video_files(root: Path) -> Iterator[Path]:
 def sha256_file(path: Path, *, root: Path | None = None) -> str:
     """Return a streaming SHA-256 digest, optionally enforcing *root*."""
     read_path = resolve_safe_media_path(root, path) if root is not None else Path(path)
-    digest = hashlib.sha256()
-    with read_path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return _stream_sha256(read_path)
 
 
 def _frame_rate(value: object) -> float | None:
