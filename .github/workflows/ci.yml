@@ -18,3 +18,5 @@ jobs:
       - run: ruff check video_labeler
       - run: mypy video_labeler --exclude 'video_labeler/(storage|services|quality)'
       - run: python -m pytest -q -p no:cacheprovider
+      # 根目录三份测试脚本(80 个用例,混合 unittest/pytest 风格)不在 testpaths 内,显式纳入回归
+      - run: python -m pytest -q test_video_event_labeler.py test_person_identity_labeler.py test_integration_workflow.py

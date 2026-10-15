@@ -1,3 +1,10 @@
+# 本机系统代理(Windows 注册表)会把 127.0.0.1 的请求也交给代理,导致 urlopen 超时;
+# 显式豁免回环地址,保证测试在任何代理环境下都能直连本地服务。
+import os
+
+os.environ.setdefault("no_proxy", "127.0.0.1,localhost")
+os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
+
 import csv
 import json
 import threading
