@@ -341,12 +341,12 @@ sample_id,video_path,lighting,lighting_evidence,behavior_class,behavior_id,secur
 
 ```powershell
 python -m pytest -q          # 运行 tests/ 下的测试套件（pyproject 的 testpaths）
-python -m pytest test_video_event_labeler.py   # 根目录的 unittest 风格脚本测试需显式指定
+python -m pytest test_video_event_labeler.py test_person_identity_labeler.py test_integration_workflow.py   # 根目录测试(unittest/pytest 混合风格,约 80 用例)
 python -m ruff check video_labeler
 python -m mypy video_labeler --exclude 'video_labeler/(storage|services|quality)'
 ```
 
-GitHub Actions 在 Ubuntu 与 Windows（Python 3.11）上运行编译检查、ruff、mypy 和 pytest；根目录标注脚本与 `old/` 归档不在 ruff/mypy 范围内（见 `pyproject.toml`）。
+GitHub Actions 在 Ubuntu 与 Windows（Python 3.11）上运行编译检查、ruff、mypy、pytest（tests/）**以及根目录三份测试脚本**（已纳入 CI，同时测试文件内置 `no_proxy` 豁免,本机系统代理不会劫持 127.0.0.1 请求）；根目录标注脚本与 `old/` 归档不在 ruff/mypy 范围内（见 `pyproject.toml`）。
 
 变更记录见 `CHANGELOG.md`（当前版本 0.2.0）。
 
