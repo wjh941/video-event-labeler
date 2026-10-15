@@ -39,15 +39,32 @@ def test_probe_without_ffprobe_is_unavailable(tmp_path):
     assert metadata.audio_present is None
 
 
+def _write_fake_ffprobe(tmp_path: Path, name: str, body: str) -> Path:
+    """Write a fake ffprobe script; probe_media invokes it via sys.executable."""
+    ffprobe = tmp_path / name
+    ffprobe.write_text(body, encoding="utf-8")
+    return ffprobe
+
+
+def _print_payload_body(payload) -> str:
+    return "import json, sys\n" f"sys.stdout.write({json.dumps(json.dumps(payload))})\n"
+
+
 def test_probe_parses_ffprobe_json(tmp_path):
     media = tmp_path / "sample.mp4"
     media.write_bytes(b"x")
-    ffprobe = tmp_path / "ffprobe.py"
-    ffprobe.write_text(
-        "@echo {\"format\": {\"duration\": \"2.5\"}, \"streams\": "
-        "[{\"codec_type\":\"video\",\"width\":640,\"height\":360,\"r_frame_rate\":\"30/1\"}, "
-        "{\"codec_type\":\"audio\"}]}\n",
-        encoding="utf-8",
+    ffprobe = _write_fake_ffprobe(
+        tmp_path,
+        "ffprobe.py",
+        _print_payload_body(
+            {
+                "format": {"duration": "2.5"},
+                "streams": [
+                    {"codec_type": "video", "width": 640, "height": 360, "r_frame_rate": "30/1"},
+                    {"codec_type": "audio"},
+                ],
+            }
+        ),
     )
     metadata = probe_media(media, ffprobe_path=ffprobe)
     assert metadata.probe_status == "ok"
@@ -69,9 +86,26 @@ def test_probe_rejects_semantically_malformed_payloads(tmp_path):
         {"format": {"duration": "1"}, "streams": [{"codec_type": "video", "width": 640, "height": 360, "r_frame_rate": "nan/1"}]},
     ]
     for index, payload in enumerate(cases):
-        ffprobe = tmp_path / f"ffprobe-{index}.py"
-        ffprobe.write_text("@echo " + json.dumps(payload) + "\n", encoding="utf-8")
+        ffprobe = _write_fake_ffprobe(tmp_path, f"ffprobe-{index}.py", _print_payload_body(payload))
         assert probe_media(media, ffprobe_path=ffprobe) == probe_media(media, ffprobe_path=tmp_path / "missing")
+
+
+def test_probe_nonzero_exit_is_unavailable_even_with_valid_stdout(tmp_path):
+    media = tmp_path / "sample.mp4"
+    media.write_bytes(b"x")
+    payload = {
+        "format": {"duration": "2.5"},
+        "streams": [{"codec_type": "video", "width": 640, "height": 360, "r_frame_rate": "30/1"}],
+    }
+    ffprobe = _write_fake_ffprobe(
+        tmp_path,
+        "ffprobe-fail.py",
+        _print_payload_body(payload) + "sys.exit(1)\n",
+    )
+    metadata = probe_media(media, ffprobe_path=ffprobe)
+    assert metadata.probe_status == "unavailable"
+    assert metadata.duration_ms is None
+    assert metadata.audio_present is None
 
 
 def test_safe_resolved_path_is_used_for_hash_and_probe(tmp_path):

@@ -132,19 +132,8 @@ def probe_media(path: Path, ffprobe_path: Path | None = None, *, root: Path | No
             check=False,
         )
         if completed.returncode != 0:
-            # Permit a tiny ``@echo {json}`` command shim used by Windows-only
-            # fixtures without weakening normal ffprobe failure handling.
-            try:
-                shim = ffprobe_path.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeError):
-                shim = ""
-            if shim.lower().startswith("@echo "):
-                completed_stdout = shim[6:].strip()
-            else:
-                return MediaMetadata()
-        else:
-            completed_stdout = completed.stdout
-        payload = json.loads(completed_stdout)
+            return MediaMetadata()
+        payload = json.loads(completed.stdout)
         if not isinstance(payload, dict):
             return MediaMetadata()
         streams = payload.get("streams")
