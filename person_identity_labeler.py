@@ -36,6 +36,7 @@ from urllib.parse import parse_qs, urlparse
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
 from video_labeler.storage.sqlite_store import SQLiteStore
+from video_labeler.web_common import CsvConflictError
 
 
 ENCODING_CANDIDATES = ("utf-8-sig", "utf-8", "gb18030", "cp936", "cp1252")
@@ -552,10 +553,6 @@ class AppState:
                 self.rows,
             )
             return self.row_payload(row_index)
-
-
-class CsvConflictError(Exception):
-    """Raised when another annotation process changed the CSV first."""
 
 
 HTML_PAGE = r"""<!doctype html>

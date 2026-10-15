@@ -26,6 +26,7 @@ from video_labeler.hashing import sha256_file as _sha256_file
 from video_labeler.services import AnnotationService
 from video_labeler.storage.csv_adapter import import_csv
 from video_labeler.storage.sqlite_store import SQLiteStore
+from video_labeler.web_common import CsvConflictError
 
 
 BEHAVIOR_LABELS = (
@@ -762,10 +763,6 @@ def safe_video_path(root: Path, relative: str) -> Path | None:
 
 def _split_behavior_ids(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[,，]", value or "") if part.strip()]
-
-
-class CsvConflictError(Exception):
-    """Raised when a client tries to save against an older CSV revision."""
 
 
 def _update_row(state: AppState, payload: dict[str, object]) -> dict[str, object]:
