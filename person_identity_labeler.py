@@ -338,6 +338,11 @@ def serialize_csv(
             os.remove(temp_name)
 
 
+# 与 video_event_labeler.AppState 同源（同一单文件应用的两支演化），但互不为子集，故不抽公共基类：
+# 锁类型（RLock 可重入 vs Lock + 非重入 _unlocked 内部方法）、行缓存（公开 rows/fieldnames 直读 vs
+# mtime/size 签名失效 + 快照逐行拷贝）、DB revision 算法（逐条拼接哈希 vs json 载荷哈希，摘要经
+# state_payload 对外可见、改动即破坏乐观锁）、专属字段（default_video_path/encoding/delimiter）与
+# 人物标注域方法均不同；强行抽象只能得到空壳基类或改变行为。
 class AppState:
     def __init__(
         self,

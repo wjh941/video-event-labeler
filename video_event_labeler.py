@@ -565,6 +565,10 @@ def import_video_directory(
     return manifest, len(added_rows)
 
 
+# 与 person_identity_labeler.AppState 同源（同一单文件应用的两支演化），但互不为子集，故不抽公共基类：
+# 锁类型（Lock + 非重入 _unlocked 内部方法 vs RLock 可重入）、行缓存（mtime/size 签名失效 + 快照逐行拷贝 vs
+# 公开 rows/fieldnames 直读）、DB revision 算法（json 载荷哈希 vs 逐条拼接哈希，摘要对外可见、改动即破坏 HTTP
+# 乐观锁）、CSV 模式（events 全字段 vs 人物 4 列）均不同；强行抽象只能得到空壳基类或改变行为。
 @dataclass
 class AppState:
     csv_path: Path | None = None
