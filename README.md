@@ -1,6 +1,6 @@
 # 视频事件标注工具（Video Event Labeler）
 
-> **“Garbage in, garbage out.”** —— 早期计算机科学格言
+> 🎬 **使用场景**：监控行为研究要精确到毫秒地标注"何时发生了什么"，还要跨设备复核质量。打开浏览器就能标：视频截取起止、循环复查、审核并下一条，数据存在本地 SQLite。
 
 [![CI](https://img.shields.io/github/actions/workflow/status/wjh941/video-event-labeler/ci.yml?branch=main&label=CI)](https://github.com/wjh941/video-event-labeler/actions/workflows/ci.yml) [![python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml) [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml) [![platform](https://img.shields.io/badge/platform-Windows-blue)]
 
