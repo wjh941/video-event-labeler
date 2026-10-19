@@ -1,5 +1,7 @@
 # 视频事件标注工具（Video Event Labeler）
 
+> **“Garbage in, garbage out.”** —— 早期计算机科学格言
+
 [![CI](https://img.shields.io/github/actions/workflow/status/wjh941/video-event-labeler/ci.yml?branch=main&label=CI)](https://github.com/wjh941/video-event-labeler/actions/workflows/ci.yml) [![python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml) [![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](pyproject.toml) [![platform](https://img.shields.io/badge/platform-Windows-blue)]
 
 面向本地视频数据集的两阶段网页标注工具：先把一个视频目录递归整理成清单 CSV 并标注行为事件与毫秒级时间段，再用同一份 CSV 标注人物身份属性。
